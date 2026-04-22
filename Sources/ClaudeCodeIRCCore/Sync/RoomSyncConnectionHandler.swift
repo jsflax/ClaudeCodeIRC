@@ -39,7 +39,12 @@ final class RoomSyncConnectionHandler: ChannelInboundHandler {
 
     // MARK: - Lifecycle
 
-    func channelActive(context: ChannelHandlerContext) {
+    /// `channelActive` already fired on the raw TCP channel before the
+    /// HTTP→WS upgrade spliced us in, so we'd never see it. Use
+    /// `handlerAdded` — NIO fires it when the handler is inserted into
+    /// the pipeline, which is exactly the point at which the peer has
+    /// upgraded and we want to do catch-up.
+    func handlerAdded(context: ChannelHandlerContext) {
         let box = ChannelBox(channel: context.channel)
         let server = self.server
         let checkpoint = self.lastEventId

@@ -1,12 +1,20 @@
 import Foundation
+import os
 
 /// File-backed logger used all over the app while we debug connection
 /// and sync plumbing. Writes to
 ///   `~/Library/Logs/ClaudeCodeIRC/ccirc.log`
-/// and never stdout/stderr — the TUI owns those and interleaved lines
-/// would garble the ncurses output.
+/// with pid + timestamp per line so two instances running on the same
+/// machine (host + peer in separate terminals) can share one file and
+/// be disambiguated with `grep pid=`.
 ///
-/// Thread-safety: serializes writes on a single queue.
+/// Also mirrors each line through `os.Logger` under the `ccirc.app`
+/// subsystem so a single `log stream` invocation can merge Lattice's
+/// own `lattice.io` logs with ours:
+///
+///   log stream --predicate 'subsystem == "ccirc.app" OR subsystem == "lattice.io"' --level debug
+///
+/// Thread-safety: serializes file writes on a single queue.
 public enum Log {
     private static let fileHandle: FileHandle? = {
         let logDir = FileManager.default
@@ -19,7 +27,7 @@ public enum Log {
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }
         let fh = try? FileHandle(forWritingTo: url)
-        try? fh?.seekToEnd()
+        _ = try? fh?.seekToEnd()
         return fh
     }()
 
@@ -31,13 +39,26 @@ public enum Log {
         return df
     }()
 
+    private static let pid: Int32 = getpid()
+
+    /// Cache `os.Logger` instances per tag. Guarded by `queue`.
+    nonisolated(unsafe) private static var loggers: [String: Logger] = [:]
+    private static func osLogger(for tag: String) -> Logger {
+        if let existing = loggers[tag] { return existing }
+        let l = Logger(subsystem: "ccirc.app", category: tag)
+        loggers[tag] = l
+        return l
+    }
+
     public static func line(_ tag: String, _ msg: @autoclosure @escaping () -> String) {
         let message = msg()
         let ts = dateFormatter.string(from: Date())
         queue.async {
-            guard let fh = fileHandle else { return }
-            let line = "[\(ts)] [\(tag)] \(message)\n"
-            fh.write(Data(line.utf8))
+            if let fh = fileHandle {
+                let line = "[\(ts)] [pid=\(pid)] [\(tag)] \(message)\n"
+                fh.write(Data(line.utf8))
+            }
+            osLogger(for: tag).debug("\(message, privacy: .public)")
         }
     }
 

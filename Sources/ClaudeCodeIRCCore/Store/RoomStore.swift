@@ -45,7 +45,7 @@ public enum RoomStore {
         return try Lattice(
             for: schema,
             configuration: .init(
-                fileURL: RoomPaths.storeURL(forCode: code),
+                fileURL: RoomPaths.peerStoreURL(forCode: code),
                 authorizationToken: joinCode,
                 wssEndpoint: endpoint))
     }

@@ -20,6 +20,14 @@ public enum RoomPaths {
         rootDirectory.appending(path: "\(code).lattice")
     }
 
+    /// Peer-side room file. Scoped by pid so two instances running on
+    /// the same machine (host + peer, or two peers) don't share the
+    /// same SQLite file — the peer is supposed to be a replica that
+    /// syncs *over the wire*, not a second handle on the host's file.
+    public static func peerStoreURL(forCode code: String, pid: pid_t = getpid()) -> URL {
+        rootDirectory.appending(path: "\(code).peer-\(pid).lattice")
+    }
+
     /// Create the rooms directory if it doesn't exist. Idempotent.
     public static func ensureRootDirectoryExists() throws {
         try FileManager.default.createDirectory(

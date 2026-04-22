@@ -60,7 +60,9 @@ public final class LobbyModel {
     ) async throws -> RoomModel {
         let roomCode = Self.generateCode()
         let joinCode: String? = requireJoinCode ? Self.generateCode() : nil
+        Log.line("lobby", "host name=\(name) cwd=\(cwd) roomCode=\(roomCode) auth=\(requireJoinCode ? "required" : "open")")
         let lattice = try RoomStore.openHost(code: roomCode)
+        Log.line("lobby", "host lattice opened → \(lattice.configuration.fileURL.lastPathComponent)")
 
         let session = Session()
         session.code = roomCode
@@ -81,6 +83,7 @@ public final class LobbyModel {
             roomCode: roomCode,
             joinCode: joinCode)
         let port = try await server.start()
+        Log.line("lobby", "server.start returned port=\(port)")
 
         let publisher = BonjourPublisher(
             name: name,
@@ -90,6 +93,7 @@ public final class LobbyModel {
             cwd: cwd,
             requiresJoinCode: requireJoinCode)
         publisher.publish()
+        Log.line("lobby", "bonjour publish name=\(name) port=\(port) nick=\(self.prefs.nick)")
 
         prefs.lastCwd = cwd
 
@@ -105,10 +109,12 @@ public final class LobbyModel {
     /// Join an existing room. `joinCode` is `nil` for open rooms; a
     /// string for password-protected ones.
     public func join(_ room: DiscoveredRoom, joinCode: String?) throws -> RoomModel {
+        Log.line("lobby", "join room=\(room.name) code=\(room.roomCode) ws=\(room.wsURL.absoluteString) auth=\(joinCode == nil ? "open" : "required")")
         let lattice = try RoomStore.openPeer(
             code: room.roomCode,
             endpoint: room.wsURL,
             joinCode: joinCode)
+        Log.line("lobby", "peer lattice opened → \(lattice.configuration.fileURL.lastPathComponent) wss=\(lattice.configuration.wssEndpoint?.absoluteString ?? "nil")")
         return RoomModel.peer(
             lattice: lattice,
             roomCode: room.roomCode,

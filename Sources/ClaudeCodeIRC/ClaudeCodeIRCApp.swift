@@ -31,6 +31,7 @@ struct RootView: View {
 @main
 struct ClaudeCodeIRCApp: App {
     init() {
+        Log.line("app", "startup — log file: \(Log.filePath)")
         // `@Query` Wrapper's init seeds its TableResults value from
         // `LatticeKey.defaultValue.objects(T.self)` BEFORE the room
         // lattice is installed via the environment. If that fallback
@@ -41,6 +42,7 @@ struct ClaudeCodeIRCApp: App {
         LatticeKey.defaultValue = try! Lattice(
             for: RoomStore.schema + [AppPreferences.self],
             configuration: .init(isStoredInMemoryOnly: true))
+        Log.line("app", "LatticeKey.defaultValue seeded with full schema")
     }
 
     var body: some Scene {

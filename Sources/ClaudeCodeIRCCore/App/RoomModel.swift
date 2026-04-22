@@ -53,10 +53,12 @@ public final class RoomModel {
         joinCode: String?,
         nick: String
     ) -> RoomModel {
+        Log.line("room-peer", "creating peer nick=\(nick) roomCode=\(roomCode)")
         let me = Member()
         me.nick = nick
         me.isHost = false
         lattice.add(me)
+        Log.line("room-peer", "inserted selfMember nick=\(me.nick)")
 
         let model = RoomModel(
             lattice: lattice,
@@ -87,26 +89,33 @@ public final class RoomModel {
 
     private func startPeerCatchUp(roomCode: String) {
         catchUpTask = Task { [weak self, lattice] in
+            Log.line("room-peer", "catch-up task started, watching for Session code=\(roomCode)")
             // Check once up front in case the Session already exists
             // (reconnect to a room whose DB is on disk from a prior run).
             if let existing = lattice.objects(Session.self)
                 .first(where: { $0.code == roomCode }) {
+                Log.line("room-peer", "session already present → link immediately")
                 self?.linkToSession(existing)
                 return
             }
+            Log.line("room-peer", "tailing changeStream for Session arrival")
             // Otherwise tail changeStream until it shows up.
-            for await _ in lattice.changeStream {
+            for await refs in lattice.changeStream {
                 if Task.isCancelled { return }
+                Log.line("room-peer", "changeStream yielded \(refs.count) refs")
                 if let s = lattice.objects(Session.self)
                     .first(where: { $0.code == roomCode }) {
+                    Log.line("room-peer", "Session \(roomCode) arrived via sync → linking")
                     self?.linkToSession(s)
                     return
                 }
             }
+            Log.line("room-peer", "catch-up task exited (stream ended)")
         }
     }
 
     private func linkToSession(_ session: Session) {
+        Log.line("room-peer", "linkToSession name=\(session.name) code=\(session.code)")
         self.session = session
         selfMember?.session = session
     }

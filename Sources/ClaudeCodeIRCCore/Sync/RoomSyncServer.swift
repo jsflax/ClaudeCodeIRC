@@ -72,6 +72,7 @@ public actor RoomSyncServer {
         guard let port = boundChannel.localAddress?.port else {
             throw RoomSyncError.bindFailed
         }
+        Log.line("server", "bound 0.0.0.0:\(port) roomCode=\(self.roomCode) auth=\(self.joinCode == nil ? "open" : "required")")
 
         // Tail the audit log. Each write the host's UI makes (or a peer
         // upload applied via `lattice.receive`) fires as a new
@@ -80,10 +81,13 @@ public actor RoomSyncServer {
         // globalId dedup, so sender gets its own back — fine.
         let stream = lattice.changeStream
         relayTask = Task.detached { [weak self] in
+            Log.line("server", "relay task started")
             for await refs in stream {
                 guard let self else { return }
+                Log.line("server", "changeStream yielded \(refs.count) refs")
                 await self.broadcastEntries(refs)
             }
+            Log.line("server", "relay task exited")
         }
 
         return port
@@ -98,9 +102,15 @@ public actor RoomSyncServer {
 
     private func broadcastEntries(_ refs: [any SendableReference<AuditLog>]) {
         let resolved = refs.compactMap { $0.resolve(on: lattice) }
-        guard !resolved.isEmpty,
-              let data = try? JSONEncoder().encode(ServerSentEvent.auditLog(resolved))
-        else { return }
+        guard !resolved.isEmpty else {
+            Log.line("server", "broadcast skipped — no resolvable refs")
+            return
+        }
+        guard let data = try? JSONEncoder().encode(ServerSentEvent.auditLog(resolved)) else {
+            Log.line("server", "broadcast skipped — encode failed")
+            return
+        }
+        Log.line("server", "broadcast \(resolved.count) entries to \(self.peers.count) peers")
         for channel in peers.values {
             RoomSyncConnectionHandler.write(data, on: ChannelBox(channel: channel))
         }
@@ -121,14 +131,18 @@ public actor RoomSyncServer {
             shouldUpgrade: { channel, head in
                 let pathOnly = head.uri.split(separator: "?", maxSplits: 1)
                     .first.map(String.init) ?? head.uri
+                Log.line("server", "upgrade request uri=\(head.uri) remote=\(channel.remoteAddress?.description ?? "?")")
                 guard pathOnly == expectedPath else {
+                    Log.line("server", "reject: path=\(pathOnly) != \(expectedPath)")
                     return channel.eventLoop.makeSucceededFuture(nil)
                 }
                 if let expectedAuth {
                     guard head.headers["Authorization"].first == expectedAuth else {
+                        Log.line("server", "reject: auth mismatch (got=\(head.headers["Authorization"].first ?? "nil"))")
                         return channel.eventLoop.makeSucceededFuture(nil)
                     }
                 }
+                Log.line("server", "accept upgrade")
                 return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
             },
             upgradePipelineHandler: { channel, head in

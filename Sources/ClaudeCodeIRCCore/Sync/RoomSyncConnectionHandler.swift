@@ -144,32 +144,38 @@ final class RoomSyncConnectionHandler: ChannelInboundHandler {
 // entirely. Semantics are identical.
 
 func connectionOpened(server: RoomSyncServer, box: ChannelBox, checkpoint: UUID?) async {
+    Log.line("server-conn", "connection opened (checkpoint=\(checkpoint?.uuidString ?? "nil"))")
     await server.registerPeer(box)
     let pageSize: Int64 = 1000
     var offset: Int64 = 0
+    var pagesSent = 0
     while true {
         let pageData: Data?
         do {
             pageData = try await server.catchUpPage(
                 checkpoint: checkpoint, offset: offset, limit: pageSize)
         } catch {
-            FileHandle.standardError.write(
-                Data("[sync-server] catch-up encode error: \(error)\n".utf8))
+            Log.line("server-conn", "catch-up encode error: \(error)")
             return
         }
         guard let data = pageData else { break }
         RoomSyncConnectionHandler.write(data, on: box)
+        pagesSent += 1
         offset += pageSize
     }
+    Log.line("server-conn", "catch-up complete (\(pagesSent) pages sent)")
 }
 
 func connectionClosed(server: RoomSyncServer, box: ChannelBox) async {
+    Log.line("server-conn", "connection closed")
     await server.unregisterPeer(box)
 }
 
 func handleUpload(server: RoomSyncServer, sender: ChannelBox, bytes: Data) async {
+    Log.line("server-conn", "upload received (\(bytes.count) bytes)")
     do {
         let applied = try await server.receive(bytes)
+        Log.line("server-conn", "applied \(applied.count) audit entries → ack")
         let ackEvent = ServerSentEvent.ack(applied)
         let ackData = try JSONEncoder().encode(ackEvent)
         RoomSyncConnectionHandler.write(ackData, on: sender)
@@ -178,7 +184,6 @@ func handleUpload(server: RoomSyncServer, sender: ChannelBox, bytes: Data) async
         // fire the relay and broadcast to every peer (including sender,
         // who idempotently reapplies its own entries).
     } catch {
-        FileHandle.standardError.write(
-            Data("[sync-server] receive error: \(error)\n".utf8))
+        Log.line("server-conn", "receive error: \(error)")
     }
 }

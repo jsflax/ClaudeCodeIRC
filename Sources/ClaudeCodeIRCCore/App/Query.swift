@@ -50,20 +50,32 @@ public struct Query<T: Model>: DynamicProperty {
         }
 
         public func bind(_ lattice: Lattice) {
-            guard self.lattice?.configuration != lattice.configuration else { return }
+            let file = lattice.configuration.fileURL.lastPathComponent
+            guard self.lattice?.configuration != lattice.configuration else {
+                Log.line("Query<\(T.self)>", "bind skipped (same cfg, file=\(file))")
+                return
+            }
+            Log.line("Query<\(T.self)>", "bind → \(file)")
             self.lattice = lattice
             fetch()
             let live = lattice.objects(T.self).where(predicate)
             self.token = live.observe { [weak self] (_: Any) in
+                Log.line("Query<\(T.self)>", "observe fired")
                 self?.fetch()
             }
         }
 
         public func fetch() {
-            guard let lattice else { return }
+            guard let lattice else {
+                Log.line("Query<\(T.self)>", "fetch skipped (no lattice)")
+                return
+            }
             var results = lattice.objects(T.self).where(predicate)
             if let sort { results = results.sortedBy(sort) }
             self.value = results
+            var count = 0
+            for _ in results { count += 1; if count > 20 { break } }
+            Log.line("Query<\(T.self)>", "fetch → \(count)+ rows, file=\(lattice.configuration.fileURL.lastPathComponent)")
         }
     }
 

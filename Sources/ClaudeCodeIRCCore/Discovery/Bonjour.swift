@@ -47,11 +47,21 @@ public final class BonjourPublisher: NSObject, NetServiceDelegate, @unchecked Se
         service.setTXTRecord(NetService.data(fromTXTRecord: txt))
     }
 
-    public func publish() { service.publish() }
-    public func stop() { service.stop() }
+    public func publish() {
+        Log.line("bonjour-pub", "publishing name=\(self.service.name) port=\(self.service.port)")
+        self.service.publish()
+    }
+    public func stop() {
+        Log.line("bonjour-pub", "stop name=\(self.service.name)")
+        self.service.stop()
+    }
 
     public func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
-        FileHandle.standardError.write(Data("[bonjour] publish failed: \(errorDict)\n".utf8))
+        Log.line("bonjour-pub", "publish FAILED: \(errorDict)")
+    }
+
+    public func netServiceDidPublish(_ sender: NetService) {
+        Log.line("bonjour-pub", "publish succeeded: \(sender.name) port=\(sender.port)")
     }
 }
 
@@ -99,6 +109,7 @@ public final class BonjourBrowser: @unchecked Sendable {
     public init() {}
 
     public func start() {
+        Log.line("bonjour-bro", "browser start")
         stop()
         let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(
             type: claudeCodeIRCServiceType, domain: nil)
@@ -106,14 +117,19 @@ public final class BonjourBrowser: @unchecked Sendable {
         self.browser = browser
 
         browser.browseResultsChangedHandler = { [weak self] results, _ in
-            self?.rooms = results
+            let decoded = results
                 .compactMap(Self.decode(result:))
                 .sorted { $0.name < $1.name }
+            Log.line("bonjour-bro", "results changed → \(decoded.count) rooms: \(decoded.map { "\($0.name)@\($0.hostname):\($0.port)" }.joined(separator: ", "))")
+            self?.rooms = decoded
         }
         browser.start(queue: .main)
     }
 
     public func stop() {
+        if browser != nil {
+            Log.line("bonjour-bro", "browser stop")
+        }
         browser?.cancel()
         browser = nil
         rooms = []

@@ -24,7 +24,11 @@ struct RoomView: View {
                     .foregroundColor(.cyan)
                 if model.server != nil, let code = model.session?.code {
                     Text(" · room: \(code)").foregroundColor(.dim)
-                    Text(" · join: \(model.joinCode)").foregroundColor(.yellow)
+                    if let joinCode = model.joinCode {
+                        Text(" · join: \(joinCode)").foregroundColor(.yellow)
+                    } else {
+                        Text(" · open").foregroundColor(.dim)
+                    }
                 }
             }
             Text(String(repeating: "─", count: 60)).foregroundColor(.dim)

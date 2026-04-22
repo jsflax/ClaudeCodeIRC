@@ -48,9 +48,18 @@ public final class LobbyModel {
     /// Host a new room. Opens the authoritative Lattice, inserts the
     /// `Session` + host `Member`, stands up `RoomSyncServer`, publishes
     /// via Bonjour, and returns a host-mode `RoomModel`.
-    public func host(name: String, cwd: String, mode: PermissionMode) async throws -> RoomModel {
+    ///
+    /// - Parameter requireJoinCode: when `true`, generates a 6-char
+    ///   bearer code and the server rejects upgrades that don't present
+    ///   it; `false` means any LAN peer that discovers the room can join.
+    public func host(
+        name: String,
+        cwd: String,
+        mode: PermissionMode,
+        requireJoinCode: Bool
+    ) async throws -> RoomModel {
         let roomCode = Self.generateCode()
-        let joinCode = Self.generateCode()
+        let joinCode: String? = requireJoinCode ? Self.generateCode() : nil
         let lattice = try RoomStore.openHost(code: roomCode)
 
         let session = Session()
@@ -78,7 +87,8 @@ public final class LobbyModel {
             port: Int32(port),
             roomCode: roomCode,
             hostNick: prefs.nick,
-            cwd: cwd)
+            cwd: cwd,
+            requiresJoinCode: requireJoinCode)
         publisher.publish()
 
         prefs.lastCwd = cwd
@@ -92,10 +102,9 @@ public final class LobbyModel {
             publisher: publisher)
     }
 
-    /// Join an existing room. Opens a peer-side Lattice pointed at the
-    /// host's WS endpoint. The peer's own `Member` row is inserted by
-    /// `RoomModel` once `Session` catch-up arrives via sync.
-    public func join(_ room: DiscoveredRoom, joinCode: String) throws -> RoomModel {
+    /// Join an existing room. `joinCode` is `nil` for open rooms; a
+    /// string for password-protected ones.
+    public func join(_ room: DiscoveredRoom, joinCode: String?) throws -> RoomModel {
         let lattice = try RoomStore.openPeer(
             code: room.roomCode,
             endpoint: room.wsURL,

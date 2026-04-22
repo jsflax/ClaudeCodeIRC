@@ -13,7 +13,9 @@ import Lattice
 @Observable
 public final class RoomModel {
     public let lattice: Lattice
-    public let joinCode: String
+    /// `nil` for an open room; the bearer code otherwise. Host displays
+    /// it in the status bar so they can share it out-of-band.
+    public let joinCode: String?
     public private(set) var session: Session?
     public private(set) var selfMember: Member?
 
@@ -27,7 +29,7 @@ public final class RoomModel {
         lattice: Lattice,
         session: Session,
         selfMember: Member,
-        joinCode: String,
+        joinCode: String?,
         server: RoomSyncServer,
         publisher: BonjourPublisher
     ) -> RoomModel {
@@ -46,7 +48,7 @@ public final class RoomModel {
     public static func peer(
         lattice: Lattice,
         roomCode: String,
-        joinCode: String,
+        joinCode: String?,
         nick: String
     ) -> RoomModel {
         let model = RoomModel(
@@ -64,7 +66,7 @@ public final class RoomModel {
         lattice: Lattice,
         session: Session?,
         selfMember: Member?,
-        joinCode: String,
+        joinCode: String?,
         server: RoomSyncServer?,
         publisher: BonjourPublisher?
     ) {

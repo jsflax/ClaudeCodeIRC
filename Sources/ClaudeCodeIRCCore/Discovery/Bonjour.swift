@@ -17,7 +17,14 @@ public let claudeCodeIRCServiceType = "_claudecodeirc._tcp"
 public final class BonjourPublisher: NSObject, NetServiceDelegate, @unchecked Sendable {
     private let service: NetService
 
-    public init(name: String, port: Int32, roomCode: String, hostNick: String, cwd: String) {
+    public init(
+        name: String,
+        port: Int32,
+        roomCode: String,
+        hostNick: String,
+        cwd: String,
+        requiresJoinCode: Bool
+    ) {
         self.service = NetService(
             domain: "", type: claudeCodeIRCServiceType + ".",
             name: name, port: port)
@@ -25,7 +32,9 @@ public final class BonjourPublisher: NSObject, NetServiceDelegate, @unchecked Se
         service.delegate = self
         // Carry the host machine's mDNS name and port in the TXT record
         // so a browser can build the WS URL without needing to open a
-        // transient NWConnection just to resolve the endpoint.
+        // transient NWConnection just to resolve the endpoint. The `auth`
+        // flag ("1"/"0") tells the lobby whether to prompt for a join
+        // code or connect straight through.
         let hostname = ProcessInfo.processInfo.hostName   // "foo.local"
         let txt: [String: Data] = [
             "code": Data(roomCode.utf8),
@@ -33,6 +42,7 @@ public final class BonjourPublisher: NSObject, NetServiceDelegate, @unchecked Se
             "cwd": Data(cwd.utf8),
             "hostname": Data(hostname.utf8),
             "port": Data(String(port).utf8),
+            "auth": Data((requiresJoinCode ? "1" : "0").utf8),
         ]
         service.setTXTRecord(NetService.data(fromTXTRecord: txt))
     }
@@ -57,6 +67,10 @@ public struct DiscoveredRoom: Identifiable, Hashable, Sendable {
     public let cwd: String
     public let hostname: String // e.g. "foos-mbp.local"
     public let port: Int
+    /// `true` when the host's Bonjour TXT advertised `auth=1`. Older
+    /// hosts that pre-date the flag default to `true` (safer assumption —
+    /// lobby prompts for a code rather than silently joining).
+    public let requiresJoinCode: Bool
 
     /// WS URL to pass into `Lattice.Configuration.wssEndpoint`. The
     /// `last-event-id` query param is appended by the Lattice sync
@@ -116,6 +130,8 @@ public final class BonjourBrowser: @unchecked Sendable {
               let portStr = txt["port"], let port = Int(portStr) else {
             return nil
         }
+        // auth flag: "1" = required, "0" = open, missing = assume required
+        let requiresJoinCode = (txt["auth"] ?? "1") != "0"
         return DiscoveredRoom(
             id: name,
             name: name,
@@ -123,6 +139,7 @@ public final class BonjourBrowser: @unchecked Sendable {
             hostNick: txt["host"] ?? "?",
             cwd: txt["cwd"] ?? "",
             hostname: hostname,
-            port: port)
+            port: port,
+            requiresJoinCode: requiresJoinCode)
     }
 }

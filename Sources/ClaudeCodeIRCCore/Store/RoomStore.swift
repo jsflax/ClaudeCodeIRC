@@ -33,10 +33,13 @@ public enum RoomStore {
 
     /// Open an empty peer-side replica that syncs to the given host endpoint.
     /// The first sync will catch up the full history from the host.
+    /// `joinCode` is `nil` for open rooms; the peer's Lattice is then
+    /// configured without an `authorizationToken`, and the host's server
+    /// accepts the upgrade without a bearer check.
     public static func openPeer(
         code: String,
         endpoint: URL,
-        joinCode: String
+        joinCode: String?
     ) throws -> Lattice {
         try RoomPaths.ensureRootDirectoryExists()
         return try Lattice(

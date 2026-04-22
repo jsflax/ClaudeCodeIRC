@@ -22,7 +22,10 @@ import NIOWebSocket
 /// before touching either Lattice or the peer registry.
 public actor RoomSyncServer {
     public let roomCode: String
-    public let joinCode: String
+    /// `nil` means the room is open — any LAN peer that discovers the
+    /// Bonjour advertisement can join without a bearer token. Set to a
+    /// string to require `Authorization: Bearer <joinCode>` on upgrade.
+    public let joinCode: String?
 
     let lattice: Lattice
     private let group: MultiThreadedEventLoopGroup
@@ -38,7 +41,7 @@ public actor RoomSyncServer {
     public init(
         latticeReference: LatticeThreadSafeReference,
         roomCode: String,
-        joinCode: String
+        joinCode: String?
     ) throws {
         guard let resolved = latticeReference.resolve() else {
             throw RoomSyncError.latticeResolveFailed
@@ -59,7 +62,8 @@ public actor RoomSyncServer {
             .childChannelInitializer { [roomCode, joinCode] channel in
                 RoomSyncServer.configurePipeline(
                     on: channel, server: self,
-                    roomCode: roomCode, joinCode: joinCode)
+                    roomCode: roomCode,
+                    joinCode: joinCode)
             }
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 
@@ -108,10 +112,10 @@ public actor RoomSyncServer {
         on channel: Channel,
         server: RoomSyncServer,
         roomCode: String,
-        joinCode: String
+        joinCode: String?
     ) -> EventLoopFuture<Void> {
         let expectedPath = "/room/\(roomCode)"
-        let expectedAuth = "Bearer \(joinCode)"
+        let expectedAuth = joinCode.map { "Bearer \($0)" }
 
         let upgrader = NIOWebSocketServerUpgrader(
             shouldUpgrade: { channel, head in
@@ -120,8 +124,10 @@ public actor RoomSyncServer {
                 guard pathOnly == expectedPath else {
                     return channel.eventLoop.makeSucceededFuture(nil)
                 }
-                guard head.headers["Authorization"].first == expectedAuth else {
-                    return channel.eventLoop.makeSucceededFuture(nil)
+                if let expectedAuth {
+                    guard head.headers["Authorization"].first == expectedAuth else {
+                        return channel.eventLoop.makeSucceededFuture(nil)
+                    }
                 }
                 return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
             },

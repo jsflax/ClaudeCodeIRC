@@ -1,21 +1,39 @@
 import ClaudeCodeIRCCore
 import NCursesUI
 
+/// Tab-cycled focus regions in the lobby. Used to route printable-ASCII
+/// keys to the right widget: when `.nick`, the TextField claims input;
+/// when `.list` or `.host`, printable keys bubble up to root hotkeys.
+enum LobbyFocus {
+    case list
+    case host
+    case nick
+}
+
 struct LobbyView: View {
     let model: LobbyModel
     let onEnterRoom: (RoomModel) -> Void
 
     @Environment(\.screen) var screen
+    @State private var focus: LobbyFocus = .list
     @State private var selection: String?
     @State private var hostFormVisible: Bool = false
     @State private var joinFormVisible: Bool = false
     @State private var joinCodeInput: String = ""
     @State private var pendingJoin: DiscoveredRoom?
+    @State private var lobbyError: String = ""
 
     private var nickBinding: Binding<String> {
         Binding(
             get: { model.prefs.nick },
             set: { model.prefs.nick = $0 })
+    }
+
+    private var listFocusBinding: Binding<Bool> {
+        Binding(get: { focus == .list }, set: { _ in })
+    }
+    private var nickFocusBinding: Binding<Bool> {
+        Binding(get: { focus == .nick }, set: { _ in })
     }
 
     var body: some View {
@@ -24,37 +42,71 @@ struct LobbyView: View {
             SpacerView(1)
             Text("Sessions on this network").foregroundColor(.dim)
 
-            List(model.browser.rooms, selection: $selection) { room, isSelected in
+            List(model.browser.rooms,
+                 selection: $selection,
+                 isFocused: listFocusBinding) { room, isSelected in
                 Text("\(isSelected ? "▸ " : "  ")\(room.name)  \(room.cwd)")
                     .foregroundColor(isSelected ? .cyan : .white)
             }
-            .onSubmit {
+            .onSubmit(isFocused: listFocusBinding) {
                 guard let id = selection,
                       let room = model.browser.rooms.first(where: { $0.id == id })
                 else { return }
-                pendingJoin = room
-                joinCodeInput = ""
-                joinFormVisible = true
+                if room.requiresJoinCode {
+                    pendingJoin = room
+                    joinCodeInput = ""
+                    joinFormVisible = true
+                } else {
+                    // Open room — no prompt, connect straight through.
+                    do {
+                        let r = try model.join(room, joinCode: nil)
+                        onEnterRoom(r)
+                    } catch {
+                        lobbyError = "join failed: \(error)"
+                    }
+                }
             }
 
             SpacerView(1)
             Text("─ or ─").foregroundColor(.dim)
-            Text("[H] host a new session").foregroundColor(.cyan)
+            Text("[ Host a new session ]")
+                .foregroundColor(focus == .host ? .cyan : .white)
+                .reverse(focus == .host)
             SpacerView(1)
 
             HStack {
                 Text("nick: ").foregroundColor(.dim)
-                TextField("enter your nick", text: nickBinding)
+                TextField("enter your nick",
+                          text: nickBinding,
+                          isFocused: nickFocusBinding)
             }
 
             SpacerView(1)
-            Text("q quit").foregroundColor(.dim)
+            Text("↵ join/host   ⇥ switch   q quit").foregroundColor(.dim)
+            if !lobbyError.isEmpty {
+                Text(lobbyError).foregroundColor(.red)
+            }
+        }
+        .onKeyPress(9 /* Tab */) {
+            focus = switch focus {
+            case .list: .host
+            case .host: .nick
+            case .nick: .list
+            }
+        }
+        .onKeyPress(Int32(UInt8(ascii: "\n"))) {
+            // List and TextField claim Enter themselves when focused;
+            // this handler only fires when focus == .host.
+            if focus == .host {
+                hostFormVisible = true
+            }
         }
         .onKeyPress(Int32(UInt8(ascii: "q"))) {
-            screen?.shouldExit = true
-        }
-        .onKeyPress(Int32(UInt8(ascii: "h"))) {
-            hostFormVisible = true
+            // Only acts as quit when a text field isn't focused (it'd
+            // claim the 'q' first otherwise).
+            if focus != .nick {
+                screen?.shouldExit = true
+            }
         }
         .overlay(isPresented: $hostFormVisible, dimsBackground: true) {
             HostFormOverlay(
@@ -79,12 +131,20 @@ struct LobbyView: View {
     }
 }
 
+/// Host form — two TextFields (name, cwd) + a "require join code"
+/// toggle, cycled via Tab. Default is require-code (safer for a
+/// LAN-advertised room). Space on the toggle flips it. Ctrl+C submits;
+/// ESC dismisses.
+enum HostFormFocus { case name, cwd, auth }
+
 struct HostFormOverlay: View {
     let model: LobbyModel
     @Binding var isPresented: Bool
     let onCreated: (RoomModel) -> Void
 
+    @State private var focus: HostFormFocus = .name
     @State private var name: String = ""
+    @State private var requireCode: Bool = true
     @State private var error: String = ""
 
     private var cwdBinding: Binding<String> {
@@ -92,44 +152,87 @@ struct HostFormOverlay: View {
             get: { model.prefs.lastCwd },
             set: { model.prefs.lastCwd = $0 })
     }
+    private var nameFocus: Binding<Bool> {
+        Binding(get: { focus == .name }, set: { _ in })
+    }
+    private var cwdFocus: Binding<Bool> {
+        Binding(get: { focus == .cwd }, set: { _ in })
+    }
 
     var body: some View {
-        VStack {
-            Text("─ Host a new session ─").bold()
-            SpacerView(1)
-            HStack {
-                Text("name: ").foregroundColor(.dim)
-                TextField("my session", text: $name)
+        BoxView("Host a new session", color: .cyan) {
+            VStack {
+                HStack {
+                    Text("name: ").foregroundColor(.dim)
+                    TextField("my session",
+                              text: $name,
+                              isFocused: nameFocus,
+                              onSubmit: submit)
+                }
+                HStack {
+                    Text("cwd:  ").foregroundColor(.dim)
+                    TextField("/path/to/repo",
+                              text: cwdBinding,
+                              isFocused: cwdFocus,
+                              onSubmit: submit)
+                }
+                HStack {
+                    Text("\(requireCode ? "[x]" : "[ ]") require join code")
+                        .foregroundColor(focus == .auth ? .cyan : .white)
+                        .reverse(focus == .auth)
+                }
+                SpacerView(1)
+                Text("⇥ switch   space toggle   ↵ create   ⎋ cancel")
+                    .foregroundColor(.dim)
+                if !error.isEmpty {
+                    Text(error).foregroundColor(.red)
+                }
             }
-            HStack {
-                Text("cwd:  ").foregroundColor(.dim)
-                TextField("/path/to/repo", text: cwdBinding)
+        }
+        .onKeyPress(9 /* Tab */) {
+            focus = switch focus {
+            case .name: .cwd
+            case .cwd:  .auth
+            case .auth: .name
             }
-            SpacerView(1)
-            Text("[↵] create   [ESC] cancel").foregroundColor(.dim)
-            if !error.isEmpty {
-                Text(error).foregroundColor(.red)
+        }
+        .onKeyPress(Int32(UInt8(ascii: " "))) {
+            // Space only toggles when the auth checkbox is focused —
+            // otherwise space is a legit character for TextFields.
+            if focus == .auth {
+                requireCode.toggle()
+            }
+        }
+        .onKeyPress(Int32(UInt8(ascii: "\n"))) {
+            // TextField claims Enter when focused and fires onSubmit →
+            // submit(). This root handler only runs when focus == .auth
+            // (neither TextField holds the key). Same submit path.
+            if focus == .auth {
+                submit()
             }
         }
         .onKeyPress(27 /* ESC */) {
             isPresented = false
         }
-        .onKeyPress(Int32(UInt8(ascii: "\n"))) {
-            Task {
-                do {
-                    let room = try await model.host(
-                        name: name.isEmpty ? "unnamed" : name,
-                        cwd: model.prefs.lastCwd,
-                        mode: .acceptEdits)
-                    onCreated(room)
-                } catch {
-                    self.error = "\(error)"
-                }
+    }
+
+    private func submit() {
+        Task {
+            do {
+                let room = try await model.host(
+                    name: name.isEmpty ? "unnamed" : name,
+                    cwd: model.prefs.lastCwd,
+                    mode: .acceptEdits,
+                    requireJoinCode: requireCode)
+                onCreated(room)
+            } catch {
+                self.error = "\(error)"
             }
         }
     }
 }
 
+/// Join form — one TextField for the join code. Enter submits, ESC cancels.
 struct JoinFormOverlay: View {
     let model: LobbyModel
     let room: DiscoveredRoom?
@@ -140,37 +243,41 @@ struct JoinFormOverlay: View {
     @State private var error: String = ""
 
     var body: some View {
-        VStack {
-            Text("─ Join ─").bold()
-            SpacerView(1)
-            if let room {
-                Text("room: \(room.name)").foregroundColor(.dim)
-                Text("host: \(room.hostNick)").foregroundColor(.dim)
-                SpacerView(1)
-                HStack {
-                    Text("code: ").foregroundColor(.dim)
-                    TextField("6-char join code", text: $joinCode)
+        BoxView("Join", color: .cyan) {
+            VStack {
+                if let room {
+                    Text("room: \(room.name)").foregroundColor(.dim)
+                    Text("host: \(room.hostNick)").foregroundColor(.dim)
+                    SpacerView(1)
+                    HStack {
+                        Text("code: ").foregroundColor(.dim)
+                        TextField("6-char join code",
+                                  text: $joinCode,
+                                  isFocused: .constant(true),
+                                  onSubmit: { submit() })
+                    }
+                } else {
+                    Text("no room selected").foregroundColor(.red)
                 }
-            } else {
-                Text("no room selected").foregroundColor(.red)
-            }
-            SpacerView(1)
-            Text("[↵] join   [ESC] cancel").foregroundColor(.dim)
-            if !error.isEmpty {
-                Text(error).foregroundColor(.red)
+                SpacerView(1)
+                Text("↵ join   ⎋ cancel").foregroundColor(.dim)
+                if !error.isEmpty {
+                    Text(error).foregroundColor(.red)
+                }
             }
         }
         .onKeyPress(27 /* ESC */) {
             isPresented = false
         }
-        .onKeyPress(Int32(UInt8(ascii: "\n"))) {
-            guard let room else { return }
-            do {
-                let r = try model.join(room, joinCode: joinCode)
-                onJoined(r)
-            } catch {
-                self.error = "\(error)"
-            }
+    }
+
+    private func submit() {
+        guard let room else { return }
+        do {
+            let r = try model.join(room, joinCode: joinCode)
+            onJoined(r)
+        } catch {
+            self.error = "\(error)"
         }
     }
 }

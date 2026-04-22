@@ -55,8 +55,13 @@ struct LobbyView: View {
             List(model.browser.rooms,
                  selection: selectionBinding,
                  isFocused: listFocusBinding) { room, isSelected in
-                Text("\(isSelected ? "▸ " : "  ")\(room.name)  \(room.cwd)")
-                    .foregroundColor(isSelected ? .cyan : .white)
+                // Highlight indicator is visible only when the list
+                // region is actually focused — otherwise Tabbing away
+                // to host/nick still makes the selected row look
+                // active, which is misleading.
+                let active = isSelected && focus == .list
+                Text("\(active ? "▸ " : "  ")\(room.name)  \(room.cwd)")
+                    .foregroundColor(active ? .cyan : .white)
             }
             .onSubmit(isFocused: listFocusBinding) {
                 // Use the binding's effective value so a default-highlighted

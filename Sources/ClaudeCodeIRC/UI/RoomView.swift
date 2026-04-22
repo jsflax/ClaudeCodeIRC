@@ -25,24 +25,34 @@ struct RoomView: View {
         max(1, Term.rows - 4)
     }
 
+    /// Composed into a single Text so there's no chance of conditional
+    /// HStack children collapsing to zero width and leaving only the
+    /// trailing segments visible. Colors are folded into runs.
+    private var statusBar: Text {
+        let name = model.session?.name ?? ""
+        let code = model.session?.code ?? "…"
+        let memberNicks = members.map(\.nick).joined(separator: " ")
+        let auth: (text: String, color: Color) = {
+            if let j = model.joinCode { return (" · join: \(j)", .yellow) }
+            if model.server != nil { return (" · open", .dim) }
+            return ("", .dim)
+        }()
+
+        var text = Text(name.isEmpty ? "(unnamed)" : name)
+            .foregroundColor(.cyan).bold()
+        text = text + Text(" · ").foregroundColor(.dim)
+        text = text + Text(memberNicks.isEmpty ? "(no members)" : memberNicks)
+            .foregroundColor(.cyan)
+        text = text + Text(" · room: \(code)").foregroundColor(.dim)
+        if !auth.text.isEmpty {
+            text = text + Text(auth.text).foregroundColor(auth.color)
+        }
+        return text
+    }
+
     var body: some View {
         VStack {
-            HStack {
-                if let name = model.session?.name, !name.isEmpty {
-                    Text(name).foregroundColor(.cyan).bold()
-                    Text(" · ").foregroundColor(.dim)
-                }
-                Text(members.map(\.nick).joined(separator: " "))
-                    .foregroundColor(.cyan)
-                if let code = model.session?.code {
-                    Text(" · room: \(code)").foregroundColor(.dim)
-                }
-                if let joinCode = model.joinCode {
-                    Text(" · join: \(joinCode)").foregroundColor(.yellow)
-                } else if model.server != nil {
-                    Text(" · open").foregroundColor(.dim)
-                }
-            }
+            statusBar
             HLineView()
 
             ScrollView(height: scrollHeight) {

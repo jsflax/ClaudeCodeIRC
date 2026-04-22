@@ -173,6 +173,12 @@ func connectionClosed(server: RoomSyncServer, box: ChannelBox) async {
 
 func handleUpload(server: RoomSyncServer, sender: ChannelBox, bytes: Data) async {
     Log.line("server-conn", "upload received (\(bytes.count) bytes)")
+    // Register defensively — if `connectionOpened`'s detached task hasn't
+    // landed yet, this upload's broadcast would fan-out with an empty
+    // peers set and the sender (and any other connected peer) would miss
+    // the relay. registerPeer is idempotent; calling it here closes the
+    // race between channelActive and channelRead detached tasks.
+    await server.registerPeer(sender)
     do {
         let applied = try await server.receive(bytes)
         Log.line("server-conn", "applied \(applied.count) audit entries → ack")

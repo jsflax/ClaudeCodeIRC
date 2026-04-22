@@ -16,6 +16,11 @@ import os
 ///
 /// Thread-safety: serializes file writes on a single queue.
 public enum Log {
+    /// Opened with `O_APPEND` so each `write(2)` the kernel performs is
+    /// atomic (POSIX guarantees up to PIPE_BUF bytes — our lines are far
+    /// under that). This is what lets two processes on the same machine
+    /// (host + peer) share `ccirc.log` without lines tearing into each
+    /// other mid-string.
     private static let fileHandle: FileHandle? = {
         let logDir = FileManager.default
             .urls(for: .libraryDirectory, in: .userDomainMask).first!
@@ -23,12 +28,11 @@ public enum Log {
         try? FileManager.default.createDirectory(
             at: logDir, withIntermediateDirectories: true)
         let url = logDir.appending(path: "ccirc.log")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+        let fd = url.path.withCString { path in
+            open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
         }
-        let fh = try? FileHandle(forWritingTo: url)
-        _ = try? fh?.seekToEnd()
-        return fh
+        guard fd >= 0 else { return nil }
+        return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     }()
 
     private static let queue = DispatchQueue(label: "ccirc.log")

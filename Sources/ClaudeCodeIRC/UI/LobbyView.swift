@@ -36,6 +36,16 @@ struct LobbyView: View {
         Binding(get: { focus == .nick }, set: { _ in })
     }
 
+    /// The List driven via this binding falls back to the first
+    /// discovered room when nothing is explicitly selected. That way
+    /// the first row is highlighted as soon as Bonjour finds it — user
+    /// doesn't need to press Down to prime the selection.
+    private var selectionBinding: Binding<String?> {
+        Binding(
+            get: { selection ?? model.browser.rooms.first?.id },
+            set: { selection = $0 })
+    }
+
     var body: some View {
         VStack {
             Text("ClaudeCodeIRC").foregroundColor(.cyan).bold()
@@ -43,13 +53,15 @@ struct LobbyView: View {
             Text("Sessions on this network").foregroundColor(.dim)
 
             List(model.browser.rooms,
-                 selection: $selection,
+                 selection: selectionBinding,
                  isFocused: listFocusBinding) { room, isSelected in
                 Text("\(isSelected ? "▸ " : "  ")\(room.name)  \(room.cwd)")
                     .foregroundColor(isSelected ? .cyan : .white)
             }
             .onSubmit(isFocused: listFocusBinding) {
-                guard let id = selection,
+                // Use the binding's effective value so a default-highlighted
+                // first row activates on Enter even without explicit arrows.
+                guard let id = selectionBinding.wrappedValue,
                       let room = model.browser.rooms.first(where: { $0.id == id })
                 else { return }
                 if room.requiresJoinCode {

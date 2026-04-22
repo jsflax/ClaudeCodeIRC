@@ -42,23 +42,30 @@ public final class RoomModel {
             publisher: publisher)
     }
 
-    /// Peer-side factory — Session hasn't arrived yet. Spawn a task
-    /// that tails `changeStream` until the host's `Session` row syncs
-    /// down, then insert this peer's own `Member` linked to it.
+    /// Peer-side factory. Inserts the peer's own `Member` immediately
+    /// with an unset `session` link so the UI shows the correct nick
+    /// right away; the Session arrives asynchronously via sync
+    /// catch-up, at which point `startPeerCatchUp` backfills
+    /// `Member.session`.
     public static func peer(
         lattice: Lattice,
         roomCode: String,
         joinCode: String?,
         nick: String
     ) -> RoomModel {
+        let me = Member()
+        me.nick = nick
+        me.isHost = false
+        lattice.add(me)
+
         let model = RoomModel(
             lattice: lattice,
             session: nil,
-            selfMember: nil,
+            selfMember: me,
             joinCode: joinCode,
             server: nil,
             publisher: nil)
-        model.startPeerCatchUp(roomCode: roomCode, nick: nick)
+        model.startPeerCatchUp(roomCode: roomCode)
         return model
     }
 
@@ -78,13 +85,13 @@ public final class RoomModel {
         self.publisher = publisher
     }
 
-    private func startPeerCatchUp(roomCode: String, nick: String) {
+    private func startPeerCatchUp(roomCode: String) {
         catchUpTask = Task { [weak self, lattice] in
             // Check once up front in case the Session already exists
             // (reconnect to a room whose DB is on disk from a prior run).
             if let existing = lattice.objects(Session.self)
                 .first(where: { $0.code == roomCode }) {
-                self?.registerSelf(session: existing, nick: nick)
+                self?.linkToSession(existing)
                 return
             }
             // Otherwise tail changeStream until it shows up.
@@ -92,21 +99,16 @@ public final class RoomModel {
                 if Task.isCancelled { return }
                 if let s = lattice.objects(Session.self)
                     .first(where: { $0.code == roomCode }) {
-                    self?.registerSelf(session: s, nick: nick)
+                    self?.linkToSession(s)
                     return
                 }
             }
         }
     }
 
-    private func registerSelf(session: Session, nick: String) {
-        let me = Member()
-        me.nick = nick
-        me.isHost = false
-        me.session = session
-        lattice.add(me)
+    private func linkToSession(_ session: Session) {
         self.session = session
-        self.selfMember = me
+        selfMember?.session = session
     }
 
     public func leave() async {

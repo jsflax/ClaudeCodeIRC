@@ -17,23 +17,35 @@ struct RoomView: View {
         self.onLeave = onLeave
     }
 
+    /// Terminal rows minus the fixed-height chrome around the scroll
+    /// (status bar + two HLines + input bar = 4). `Term.rows` is read
+    /// at body-eval time, so a terminal resize triggers recomputation
+    /// on the next draw.
+    private var scrollHeight: Int {
+        max(1, Term.rows - 4)
+    }
+
     var body: some View {
         VStack {
             HStack {
+                if let name = model.session?.name, !name.isEmpty {
+                    Text(name).foregroundColor(.cyan).bold()
+                    Text(" · ").foregroundColor(.dim)
+                }
                 Text(members.map(\.nick).joined(separator: " "))
                     .foregroundColor(.cyan)
-                if model.server != nil, let code = model.session?.code {
+                if let code = model.session?.code {
                     Text(" · room: \(code)").foregroundColor(.dim)
-                    if let joinCode = model.joinCode {
-                        Text(" · join: \(joinCode)").foregroundColor(.yellow)
-                    } else {
-                        Text(" · open").foregroundColor(.dim)
-                    }
+                }
+                if let joinCode = model.joinCode {
+                    Text(" · join: \(joinCode)").foregroundColor(.yellow)
+                } else if model.server != nil {
+                    Text(" · open").foregroundColor(.dim)
                 }
             }
-            Text(String(repeating: "─", count: 60)).foregroundColor(.dim)
+            HLineView()
 
-            ScrollView(height: 15) {
+            ScrollView(height: scrollHeight) {
                 VStack(spacing: 0) {
                     ForEach(messages) { msg in
                         HStack {
@@ -44,7 +56,7 @@ struct RoomView: View {
                 }
             }
 
-            Text(String(repeating: "─", count: 60)).foregroundColor(.dim)
+            HLineView()
             HStack {
                 Text("\(model.selfMember?.nick ?? "?")> ").foregroundColor(.cyan)
                 TextField("type a message…", text: $draft, onSubmit: send)

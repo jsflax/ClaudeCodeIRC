@@ -1,0 +1,45 @@
+// swift-tools-version: 6.3
+
+import PackageDescription
+
+let package = Package(
+    name: "ClaudeCodeIRC",
+    platforms: [.macOS(.v15)],
+    products: [
+        .executable(name: "claudecodeirc", targets: ["ClaudeCodeIRC"]),
+        .library(name: "ClaudeCodeIRCCore", targets: ["ClaudeCodeIRCCore"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/jsflax/NCursesUI.git", branch: "main"),
+        .package(url: "https://github.com/jsflax/lattice.git", branch: "main"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+    ],
+    targets: [
+        .executableTarget(
+            name: "ClaudeCodeIRC",
+            dependencies: [
+                "ClaudeCodeIRCCore",
+                .product(name: "NCursesUI", package: "NCursesUI"),
+                .product(name: "Lattice", package: "lattice"),
+            ],
+            swiftSettings: [.interoperabilityMode(.Cxx)]
+        ),
+        .target(
+            name: "ClaudeCodeIRCCore",
+            dependencies: [
+                .product(name: "Lattice", package: "lattice"),
+                .product(name: "NCursesUI", package: "NCursesUI"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
+            ],
+            swiftSettings: [.interoperabilityMode(.Cxx)]
+        ),
+        .testTarget(
+            name: "ClaudeCodeIRCCoreTests",
+            dependencies: ["ClaudeCodeIRCCore"],
+            swiftSettings: [.interoperabilityMode(.Cxx)]
+        ),
+    ]
+)

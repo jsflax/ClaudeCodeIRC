@@ -18,12 +18,18 @@ struct RootView: View {
                 current = .room(room)
             }
         case .room(let model):
+            // Env modifier must live OUTSIDE RoomView so that by the
+            // time RoomView's DynamicProperty update runs (which is
+            // where @Query reads @Environment(\.lattice)), the lattice
+            // has already been installed in _current. Applying the env
+            // inside RoomView's own body is too late.
             RoomView(model: model) {
                 Task {
                     await model.leave()
                     current = .lobby(LobbyModel())
                 }
             }
+            .environment(\.lattice, model.lattice)
         }
     }
 }

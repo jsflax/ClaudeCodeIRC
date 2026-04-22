@@ -72,7 +72,6 @@ struct RoomView: View {
                 TextField("type a message…", text: $draft, onSubmit: send)
             }
         }
-        .environment(\.lattice, model.lattice)
         .onKeyPress(27 /* ESC */) {
             onLeave()
         }

@@ -30,6 +30,23 @@ struct WorkspaceView: View {
         approvals.first { $0.status == .pending }
     }
 
+    // MARK: - Slash-popup state
+
+    /// Popup is visible whenever the draft looks like a partial slash
+    /// command — starts with `/` and the command portion hasn't yet
+    /// been terminated by a space (once the user types past the
+    /// command word, they're filling in arguments, not picking).
+    private var slashPopupVisible: Bool {
+        draft.hasPrefix("/") && !draft.contains(" ")
+    }
+
+    /// Commands matching the current draft prefix. Empty when the
+    /// popup isn't visible.
+    private var slashCompletions: [InputRouter.Command] {
+        guard slashPopupVisible else { return [] }
+        return InputRouter.completions(forPrefix: String(draft.dropFirst()))
+    }
+
     var body: some View {
         // `.environment(\.lattice, …)` is set by the parent `RootView`
         // around this view — @Query inside the panels (UsersSidebar,
@@ -51,15 +68,38 @@ struct WorkspaceView: View {
             }
             HLineView()
             statusLine
+            if slashPopupVisible {
+                SlashPopup(completions: slashCompletions)
+            }
             inputLine
             HotkeyStrip()
         }
         .onKeyPress(27 /* ESC */) {
-            // No-op at workspace level — D5 wires ESC to form overlays
-            // directly (HostFormOverlay / JoinFormOverlay already own
-            // their own ESC bindings). Approval cards don't dismiss on
-            // ESC; Y/A/D are the explicit affirm/deny keys.
+            // No-op at workspace level — HostForm/JoinForm own their
+            // own ESC bindings. Approval cards don't dismiss on ESC;
+            // Y/A/D are the explicit affirm/deny keys.
         }
+        // Ctrl+N / Ctrl+P cycle joined rooms. ASCII control codes —
+        // 14 ("N"-64) and 16 ("P"-64). ncurses surfaces them as raw
+        // bytes since we run with keypad off.
+        .onKeyPress(14) { model.cycleNext() }
+        .onKeyPress(16) { model.cyclePrev() }
+        // Alt+1..9 → activate room at 1-based index. Requires the
+        // terminal to treat Option as Meta (macOS Terminal.app's
+        // "Use Option as Meta" / iTerm2's Esc+ mapping). Decoded by
+        // NCursesUI's decodeAfterEsc.
+        .onKeyPress(KEY_ALT_1) { model.activateIndex(1) }
+        .onKeyPress(KEY_ALT_2) { model.activateIndex(2) }
+        .onKeyPress(KEY_ALT_3) { model.activateIndex(3) }
+        .onKeyPress(KEY_ALT_4) { model.activateIndex(4) }
+        .onKeyPress(KEY_ALT_5) { model.activateIndex(5) }
+        .onKeyPress(KEY_ALT_6) { model.activateIndex(6) }
+        .onKeyPress(KEY_ALT_7) { model.activateIndex(7) }
+        .onKeyPress(KEY_ALT_8) { model.activateIndex(8) }
+        .onKeyPress(KEY_ALT_9) { model.activateIndex(9) }
+        // Tab — slash-complete when the draft starts with `/`, nick-
+        // complete otherwise. TextField lets Tab bubble to us.
+        .onKeyPress(9) { handleTab() }
         .onKeyPress(Int32(UInt8(ascii: "Y"))) { decide(.approved, persist: false) }
         .onKeyPress(Int32(UInt8(ascii: "y"))) { decide(.approved, persist: false) }
         .onKeyPress(Int32(UInt8(ascii: "A"))) { decide(.approved, persist: true) }
@@ -156,6 +196,53 @@ struct WorkspaceView: View {
         }
     }
 
+    // MARK: - Tab completion
+
+    /// Dispatch Tab to either slash-completion (when the draft starts
+    /// with a partial `/cmd`) or nick-completion (when the last word
+    /// of the draft is a partial nick). Both paths replace just the
+    /// incomplete fragment in `draft` in place.
+    private func handleTab() {
+        if slashPopupVisible {
+            completeSlash()
+        } else {
+            completeNick()
+        }
+    }
+
+    private func completeSlash() {
+        guard let match = slashCompletions.first else { return }
+        // Replace the whole draft with the matched command's slug so
+        // subsequent keystrokes fill in arguments. The trailing space
+        // makes typing "claude" or a path immediately useful.
+        draft = "/\(match.name) "
+    }
+
+    private func completeNick() {
+        guard let room = model.activeRoom else { return }
+        // Find the last whitespace-delimited word in the draft.
+        let scalars = Array(draft)
+        var wordStart = scalars.count
+        while wordStart > 0, !scalars[wordStart - 1].isWhitespace {
+            wordStart -= 1
+        }
+        let partial = String(scalars[wordStart..<scalars.count])
+        guard !partial.isEmpty else { return }
+
+        // Candidates: every real Member's nick + synthetic "claude".
+        let nicks = Array(room.lattice.objects(Member.self)).map(\.nick) + ["claude"]
+        let matches = nicks
+            .filter { $0.lowercased().hasPrefix(partial.lowercased()) && $0 != partial }
+            .sorted()
+        guard let match = matches.first else { return }
+
+        // Append `: ` when expanding at the start of the draft (opens
+        // a new line addressed to someone), else a single space so the
+        // user can continue typing after the nick.
+        let suffix = wordStart == 0 ? ": " : " "
+        draft = String(scalars[0..<wordStart]) + match + suffix
+    }
+
     // MARK: - Send / approve
 
     private func send() {
@@ -233,6 +320,52 @@ struct WorkspaceView: View {
             room.lattice.add(policy)
         }
     }
+}
+
+// MARK: - Slash popup
+
+/// Floating list of slash-command suggestions rendered above the
+/// input line when the user is mid-typing a `/command`. Narrow — one
+/// row per match, usage on the left and description on the right.
+/// Tab or Enter from the input picks the first match (see
+/// `WorkspaceView.completeSlash`).
+struct SlashPopup: View {
+    let completions: [InputRouter.Command]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("── slash commands ─────────")
+                .foregroundColor(.dim)
+            if completions.isEmpty {
+                Text("  (no matches — Esc or Backspace to dismiss)")
+                    .foregroundColor(.dim)
+            } else {
+                // Highlight the first match — that's what Tab picks.
+                ForEach(completions) { cmd in
+                    SlashPopupRow(
+                        command: cmd,
+                        highlighted: cmd == completions.first)
+                }
+            }
+        }
+    }
+}
+
+struct SlashPopupRow: View {
+    let command: InputRouter.Command
+    let highlighted: Bool
+
+    var body: some View {
+        var line = Text("  ")
+        line = line + Text(command.usage).foregroundColor(.yellow)
+        line = line + Text("  ").foregroundColor(.dim)
+        line = line + Text(command.description).foregroundColor(.dim)
+        return line.reverse(highlighted)
+    }
+}
+
+extension InputRouter.Command: Identifiable {
+    public var id: String { name }
 }
 
 // MARK: - Panes

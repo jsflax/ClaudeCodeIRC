@@ -8,8 +8,8 @@ struct HotkeyStrip: View {
         // Keep segments short so the strip fits in narrow terminals.
         var line = Text("Alt+1..9").foregroundColor(.yellow)
         line = line + Text(" session ").foregroundColor(.dim)
-        line = line + Text("^N").foregroundColor(.yellow)
-        line = line + Text(" next ").foregroundColor(.dim)
+        line = line + Text("^N/^P").foregroundColor(.yellow)
+        line = line + Text(" next/prev ").foregroundColor(.dim)
         line = line + Text("Tab").foregroundColor(.yellow)
         line = line + Text(" complete ").foregroundColor(.dim)
         line = line + Text("/").foregroundColor(.yellow)

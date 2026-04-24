@@ -103,4 +103,27 @@ import ClaudeCodeIRCCore
         }
         #expect(msg.contains("foo"))
     }
+
+    // MARK: - Slash-popup completions
+
+    @Test func completionsEmptyPrefixReturnsAllCommands() {
+        let all = InputRouter.completions(forPrefix: "")
+        #expect(all.count == InputRouter.commands.count)
+        #expect(all.map(\.name).contains("nick"))
+        #expect(all.map(\.name).contains("leave"))
+    }
+
+    @Test func completionsNarrowByPrefix() {
+        let hits = InputRouter.completions(forPrefix: "ni")
+        #expect(hits.map(\.name) == ["nick"])
+    }
+
+    @Test func completionsAreCaseInsensitive() {
+        let hits = InputRouter.completions(forPrefix: "HELP")
+        #expect(hits.map(\.name) == ["help"])
+    }
+
+    @Test func completionsReturnEmptyOnNonMatch() {
+        #expect(InputRouter.completions(forPrefix: "zzz").isEmpty)
+    }
 }

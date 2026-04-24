@@ -94,6 +94,32 @@ public enum InputRouter {
         }
     }
 
+    /// Machine-readable slash-command catalogue. Drives the
+    /// slash-command autocomplete popup in the workspace input line.
+    /// Keep in sync with `parse(_:)` and `helpText`.
+    public struct Command: Sendable, Equatable {
+        public let name: String        // e.g. "nick"
+        public let usage: String       // e.g. "/nick <name>"
+        public let description: String // one-line help
+    }
+
+    public static let commands: [Command] = [
+        Command(name: "help",    usage: "/help",           description: "show the command list"),
+        Command(name: "nick",    usage: "/nick <name>",    description: "change your nickname"),
+        Command(name: "members", usage: "/members",        description: "list members in this room"),
+        Command(name: "side",    usage: "/side <msg>",     description: "banter excluded from Claude's context"),
+        Command(name: "leave",   usage: "/leave",          description: "leave the room"),
+    ]
+
+    /// Commands whose name starts with `prefix` (after the leading `/`),
+    /// case-insensitive. Empty prefix returns the full list. Used by
+    /// the slash popup to narrow suggestions as the user types.
+    public static func completions(forPrefix prefix: String) -> [Command] {
+        let p = prefix.lowercased()
+        guard !p.isEmpty else { return commands }
+        return commands.filter { $0.name.hasPrefix(p) }
+    }
+
     /// Help text shown when the user types `/help`. Mirrors the list
     /// of commands above; keep in sync.
     public static let helpText: String = """

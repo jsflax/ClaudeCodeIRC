@@ -35,9 +35,7 @@ public final class RoomsModel {
     }
 
     public init() {
-        let prefsURL = RoomPaths.rootDirectory
-            .deletingLastPathComponent()
-            .appending(path: "prefs.lattice")
+        let prefsURL = RoomPaths.prefsURL
         do {
             try FileManager.default.createDirectory(
                 at: prefsURL.deletingLastPathComponent(),

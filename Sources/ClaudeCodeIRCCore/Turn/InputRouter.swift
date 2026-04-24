@@ -59,6 +59,17 @@ public enum InputRouter {
         /// flag on the root view to present the modal.
         case palette
 
+        /// Open the "host a new session" form overlay. Caller flips
+        /// the corresponding `@State` on WorkspaceView.
+        case host
+
+        /// Join a Bonjour-discovered room. `nameFilter` narrows to
+        /// rooms whose name starts with it (case-insensitive); nil
+        /// picks the first unjoined discovered room. Caller opens the
+        /// join overlay (if the room requires a code) or joins
+        /// directly (open rooms).
+        case join(String?)
+
         /// Recognised slash prefix but unknown command — caller
         /// renders an error banner instead of treating as chat.
         case unknown(String)
@@ -124,6 +135,10 @@ public enum InputRouter {
             return .afk(rest.isEmpty ? nil : rest)
         case "palette":
             return .palette
+        case "host":
+            return .host
+        case "join":
+            return .join(rest.isEmpty ? nil : rest)
         case "":
             // Bare "/" — treat as chat so users can type "/usr/bin"
             // without it disappearing into the parser.
@@ -144,6 +159,8 @@ public enum InputRouter {
 
     public static let commands: [Command] = [
         Command(name: "help",    usage: "/help",           description: "show the command list"),
+        Command(name: "host",    usage: "/host",           description: "host a new session (opens form overlay)"),
+        Command(name: "join",    usage: "/join [name]",    description: "join a discovered room (prefix match)"),
         Command(name: "nick",    usage: "/nick <name>",    description: "change your nickname"),
         Command(name: "members", usage: "/members",        description: "list members in this room"),
         Command(name: "side",    usage: "/side <msg>",     description: "banter excluded from Claude's context"),

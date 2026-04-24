@@ -54,17 +54,26 @@ struct WorkspaceView: View {
         // MessageListView, this view's own approvals) resolves against
         // the active room's Lattice (or the in-memory placeholder
         // when no room is active).
-        VStack(spacing: 0) {
+        // Fixed-width 3-column layout — NCursesUI's HStack has no
+        // flex system, so center-pane width is computed explicitly
+        // from the terminal width minus sidebar + separator cols.
+        let cols = Term.cols
+        let leftWidth = 26
+        let rightWidth = 22
+        let separatorWidth = 1 * 2  // two vertical rules
+        let centerWidth = max(10, cols - leftWidth - rightWidth - separatorWidth)
+
+        return VStack(spacing: 0) {
             TopBar(model: model)
-            HStack(spacing: 1) {
-                SessionsSidebar(model: model)
+            HStack(spacing: 0) {
+                SessionsSidebar(model: model).frame(width: leftWidth)
                 Text("│").foregroundColor(.dim)
-                centerPane
+                centerPane.frame(width: centerWidth)
                 Text("│").foregroundColor(.dim)
                 if let room = model.activeRoom {
-                    UsersSidebar(room: room)
+                    UsersSidebar(room: room).frame(width: rightWidth)
                 } else {
-                    EmptyView()
+                    EmptyView().frame(width: rightWidth)
                 }
             }
             HLineView()
@@ -257,10 +266,44 @@ struct WorkspaceView: View {
     // MARK: - Send / approve
 
     private func send() {
-        guard let room = model.activeRoom else { return }
         let raw = draft
         draft = ""
         let intent = InputRouter.parse(raw)
+
+        // Commands that work from the welcome state (no active room
+        // yet). /host and /join are how a user gets into their first
+        // room, so they can't require one to exist already. /nick
+        // also runs here so the nick prefs is set before hosting —
+        // otherwise the first room's host Member gets an empty nick.
+        switch intent {
+        case .empty:
+            return
+        case .host:
+            hostFormVisible = true
+            return
+        case .join(let filter):
+            joinDiscovered(nameFilter: filter, room: model.activeRoom)
+            return
+        case .palette:
+            paletteSelectorVisible = true
+            return
+        case .setNick(let name):
+            model.prefs.nick = name
+            if let room = model.activeRoom {
+                room.selfMember?.nick = name
+                insertSystem(room: room, "nick set to \(name)")
+            }
+            return
+        default:
+            break
+        }
+
+        // Everything below mutates the active room — nothing to do
+        // without one.
+        guard let room = model.activeRoom else {
+            Log.line("workspace", "ignoring intent \(intent) — no active room")
+            return
+        }
 
         // AFK auto-clear: sending any non-system, non-afk content
         // implicitly marks you back. Keeps the "away" state honest
@@ -270,7 +313,7 @@ struct WorkspaceView: View {
         if let me = room.selfMember, me.isAway {
             switch intent {
             case .afk: break // explicit toggle — handled below
-            case .empty, .unknown, .leave, .clear, .palette: break
+            case .empty, .unknown, .leave, .clear, .palette, .host, .join: break
             default:
                 me.isAway = false
                 me.awayReason = nil
@@ -279,13 +322,12 @@ struct WorkspaceView: View {
         }
 
         switch intent {
-        case .empty: return
+        case .empty, .host, .join, .palette, .setNick:
+            // Handled above — listed here only for the exhaustive
+            // switch; shouldn't reach this branch.
+            return
         case .message(let text, let side):
             insertChat(room: room, text: text, kind: .user, side: side)
-        case .setNick(let name):
-            room.selfMember?.nick = name
-            room.prefs.nick = name
-            insertSystem(room: room, "nick set to \(name)")
         case .help:
             insertSystem(room: room, InputRouter.helpText)
         case .members:
@@ -329,9 +371,58 @@ struct WorkspaceView: View {
             }
         case .palette:
             paletteSelectorVisible = true
+        case .host:
+            hostFormVisible = true
+        case .join(let filter):
+            joinDiscovered(nameFilter: filter, room: room)
         case .unknown(let reason):
             insertSystem(room: room, "error: \(reason)")
         }
+    }
+
+    /// Resolve `/join [name]` against the Bonjour-discovered set.
+    /// `nil` filter = first unjoined discovery; string filter =
+    /// first unjoined discovery whose name starts with it
+    /// (case-insensitive). Open rooms are joined directly; rooms
+    /// requiring a code pop the join overlay pre-populated.
+    ///
+    /// `currentRoom` may be nil when the user runs /join from the
+    /// welcome state (no room active yet). In that case info /
+    /// error feedback goes to the log — there's nowhere visible to
+    /// render a system ChatMessage.
+    private func joinDiscovered(nameFilter: String?, room currentRoom: RoomInstance?) {
+        let joined = Set(model.joinedRooms.map(\.roomCode))
+        let unjoined = model.browser.rooms.filter { !joined.contains($0.roomCode) }
+        guard !unjoined.isEmpty else {
+            feedback("no discovered rooms to join", room: currentRoom)
+            return
+        }
+        let target: DiscoveredRoom?
+        if let filter = nameFilter?.lowercased() {
+            target = unjoined.first { $0.name.lowercased().hasPrefix(filter) }
+        } else {
+            target = unjoined.first
+        }
+        guard let target else {
+            feedback("no room matches '\(nameFilter ?? "")'", room: currentRoom)
+            return
+        }
+        pendingJoin = target
+        if target.requiresJoinCode {
+            joinFormVisible = true
+        } else {
+            do { _ = try model.join(target, joinCode: nil) }
+            catch { feedback("join failed: \(error)", room: currentRoom) }
+        }
+    }
+
+    /// Surface a short informational line to the user. Emits a
+    /// `.system` ChatMessage in the active room if there is one;
+    /// otherwise logs — we haven't got a toast / status-bar flash
+    /// mechanism yet for the welcome state.
+    private func feedback(_ text: String, room: RoomInstance?) {
+        if let room { insertSystem(room: room, text) }
+        else { Log.line("workspace", text) }
     }
 
     private func insertChat(room: RoomInstance, text: String, kind: MessageKind, side: Bool) {

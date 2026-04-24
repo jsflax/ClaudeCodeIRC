@@ -31,7 +31,9 @@ public enum ApprovalTally {
         }
     }
 
-    /// Pure evaluation — no Lattice reads, easy to test.
+    /// Pure evaluation — no Lattice reads, easy to test. Callers that
+    /// need to tally live rows read `yes` / `no` / `presentQuorum`
+    /// from their Lattice with `.where` predicates and hand them here.
     public static func evaluate(
         yes: Int,
         no: Int,
@@ -45,27 +47,5 @@ public enum ApprovalTally {
         }
         let outcome: ApprovalStatus = yes > no ? .approved : .denied
         return Result(yesCount: yes, noCount: no, presentQuorum: presentQuorum, outcome: outcome)
-    }
-
-    /// Evaluate against live Lattice state. Reads:
-    ///   - `request.votes` for the yes/no tallies
-    ///   - members list for `presentQuorum` = non-AFK member count
-    ///
-    /// Must be called from a context that can touch `@MainActor` Lattice
-    /// (or whatever actor hosts the Lattice instance in the caller).
-    public static func evaluate(
-        request: ApprovalRequest,
-        members: [Member]
-    ) -> Result {
-        var yes = 0, no = 0
-        for vote in Array(request.votes) {
-            switch vote.decision {
-            case .approved: yes += 1
-            case .denied:   no += 1
-            case .pending:  break
-            }
-        }
-        let quorum = members.filter { !$0.isAway }.count
-        return evaluate(yes: yes, no: no, presentQuorum: quorum)
     }
 }

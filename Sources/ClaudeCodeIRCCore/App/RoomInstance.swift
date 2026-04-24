@@ -44,6 +44,14 @@ public final class RoomInstance: Identifiable {
     /// until the current Turn completes. Protocol-typed so tests can
     /// substitute a fake.
     public let turnManager: (any TurnManaging)?
+    /// Watches vote inserts + member AFK flips and commits the
+    /// terminal `ApprovalRequest.status` when quorum lands. Runs on
+    /// every client — the tally is deterministic so host + peers all
+    /// compute the same outcome from the same sync'd state; Lattice's
+    /// last-writer-wins semantics make the writes idempotent. Peers
+    /// seeing quorum locally get the status flip immediately instead
+    /// of waiting for the host's sync round-trip.
+    private let voteCoordinator: ApprovalVoteCoordinator
 
     /// Prefs handle — shared across all RoomInstances. Threaded from
     /// `RoomsModel` so `/nick` inside a room persists across launches.
@@ -144,6 +152,9 @@ public final class RoomInstance: Identifiable {
         self.publisher = publisher
         self.driver = driver
         self.turnManager = turnManager
+        // Every room instance runs a coordinator — tally is
+        // deterministic and writes are idempotent.
+        self.voteCoordinator = ApprovalVoteCoordinator(lattice: lattice)
         self.prefs = prefs
     }
 

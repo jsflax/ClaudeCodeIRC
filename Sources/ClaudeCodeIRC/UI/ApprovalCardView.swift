@@ -1,35 +1,40 @@
 import ClaudeCodeIRCCore
 import Foundation
+import class Lattice.TableResults
 import NCursesUI
 
 /// Inline box-drawing card for an `ApprovalRequest`. Replaces the old
 /// modal `ApprovalOverlayView` per the design handoff — the card flows
-/// in scrollback alongside chat messages so both host + peers see the
-/// in-flight tool call and its outcome.
+/// in scrollback alongside chat messages so every member sees the
+/// in-flight tool call, current vote state, and final outcome.
 ///
-/// Card shape (phosphor palette colors):
+/// Card shape:
 /// ```
 /// ┌─ claude wants to use Bash ──────────────── pending ─┐
 /// │ touch /tmp/probe && ls -la /tmp/probe                │
-/// │                                                       │
-/// │ [Y] allow   [A] always-allow (host)   [D] deny        │
+/// │                                                      │
+/// │ yes: alice, bob ✓   no: carol ✗   quorum: 3 / 4      │
+/// │ [Y] vote allow   [D] vote deny   [A] always-allow    │
 /// └──────────────────────────────────────────────────────┘
 /// ```
-/// Decided cards drop the action line and show the decider's nick.
+/// Decided cards drop the action line and show the outcome + quorum
+/// snapshot.
 ///
-/// Keypress routing stays on `WorkspaceView` (Y/A/D), same as when
-/// the overlay owned them. D6b wires democratic voting on top of this
-/// card by swapping the action line for per-member vote tallies.
+/// Keypress routing stays on `WorkspaceView`. Y/D cast votes via
+/// `ApprovalVote` rows; [A] remains host-only always-allow (writes
+/// an `ApprovalPolicy` and bypasses the vote).
 struct ApprovalCardView: View {
     let request: ApprovalRequest
     let isHost: Bool
 
+    @Query var members: TableResults<Member>
     @Environment(\.palette) var palette
 
     var body: some View {
         VStack(spacing: 0) {
             header
             bodyLine
+            tallyLine
             actionLine
             footer
         }
@@ -42,9 +47,6 @@ struct ApprovalCardView: View {
         line = line + Text("claude wants to use ").foregroundColor(.dim)
         line = line + Text(request.toolName).bold()
         line = line + Text(" ").foregroundColor(accentColor)
-        // Spread the rule out to 60 cols so the card reads as a unit;
-        // terminal-width responsive layout can be refined in D10 once
-        // we have the palette-role-aware text APIs.
         let fill = String(repeating: "─", count: max(1, 32 - request.toolName.count))
         line = line + Text(fill).foregroundColor(accentColor)
         line = line + Text(" ").foregroundColor(accentColor)
@@ -68,29 +70,50 @@ struct ApprovalCardView: View {
         return line
     }
 
+    /// "yes: alice, bob ✓   no: carol ✗   quorum: 2 / 3"
+    private var tallyLine: Text {
+        let (yesNicks, noNicks) = voteBreakdown()
+        let presentQuorum = members.filter { !$0.isAway }.count
+        var line = Text("│ ").foregroundColor(accentColor)
+        line = line + Text("yes: ").foregroundColor(.dim)
+        line = line + Text(yesNicks.isEmpty ? "—" : yesNicks.joined(separator: ", "))
+            .foregroundColor(.green)
+        line = line + Text("   no: ").foregroundColor(.dim)
+        line = line + Text(noNicks.isEmpty ? "—" : noNicks.joined(separator: ", "))
+            .foregroundColor(.red)
+        line = line + Text("   quorum: ").foregroundColor(.dim)
+        line = line + Text("\(yesNicks.count + noNicks.count) / \(presentQuorum)")
+            .foregroundColor(.yellow)
+        return line
+    }
+
     private var actionLine: Text {
         var line = Text("│ ").foregroundColor(accentColor)
         switch request.status {
         case .pending:
+            line = line + Text("[Y]").foregroundColor(.green).bold()
+            line = line + Text(" vote allow   ").foregroundColor(.dim)
+            line = line + Text("[D]").foregroundColor(.red).bold()
+            line = line + Text(" vote deny").foregroundColor(.dim)
             if isHost {
-                line = line + Text("[Y]").foregroundColor(.green).bold()
-                line = line + Text(" allow   ").foregroundColor(.dim)
+                line = line + Text("   ").foregroundColor(.dim)
                 line = line + Text("[A]").foregroundColor(.yellow).bold()
-                line = line + Text(" always-allow   ").foregroundColor(.dim)
-                line = line + Text("[D]").foregroundColor(.red).bold()
-                line = line + Text(" deny").foregroundColor(.dim)
-            } else {
-                line = line + Text("waiting for host approval")
-                    .foregroundColor(.dim)
+                line = line + Text(" always-allow").foregroundColor(.dim)
             }
         case .approved:
-            let by = request.decidedBy?.nick ?? "?"
-            line = line + Text("✓ approved by ").foregroundColor(.green)
-            line = line + Text(by).foregroundColor(.green).bold()
+            if let by = request.decidedBy?.nick {
+                line = line + Text("✓ always-allowed by ").foregroundColor(.green)
+                line = line + Text(by).foregroundColor(.green).bold()
+            } else {
+                line = line + Text("✓ approved by quorum").foregroundColor(.green)
+            }
         case .denied:
-            let by = request.decidedBy?.nick ?? "?"
-            line = line + Text("✗ denied by ").foregroundColor(.red)
-            line = line + Text(by).foregroundColor(.red).bold()
+            if let by = request.decidedBy?.nick {
+                line = line + Text("✗ denied by ").foregroundColor(.red)
+                line = line + Text(by).foregroundColor(.red).bold()
+            } else {
+                line = line + Text("✗ denied by quorum").foregroundColor(.red)
+            }
         }
         return line
     }
@@ -98,6 +121,36 @@ struct ApprovalCardView: View {
     private var footer: Text {
         Text("└─────────────────────────────────────────────────────────┘")
             .foregroundColor(accentColor)
+    }
+
+    // MARK: - Tally helpers
+
+    /// Walk the request's `votes` relation once, collecting yes / no
+    /// voter nicks. Iterates lazily (no Array materialisation) and
+    /// keeps only the latest vote per voter so a flip from Y→D
+    /// doesn't double-count. The on-disk unique constraint should
+    /// already enforce uniqueness, but this reader is defensive.
+    private func voteBreakdown() -> (yes: [String], no: [String]) {
+        var latest: [UUID: ApprovalVote] = [:]
+        for vote in request.votes {
+            guard let voterGid = vote.voter?.globalId else { continue }
+            if let existing = latest[voterGid], existing.castAt > vote.castAt {
+                continue
+            }
+            latest[voterGid] = vote
+        }
+        var yes: [String] = []
+        var no: [String] = []
+        for vote in latest.values {
+            guard let nick = vote.voter?.nick else { continue }
+            switch vote.decision {
+            case .approved: yes.append(nick)
+            case .denied:   no.append(nick)
+            case .pending:  break
+            }
+        }
+        yes.sort(); no.sort()
+        return (yes, no)
     }
 
     // MARK: - Styling

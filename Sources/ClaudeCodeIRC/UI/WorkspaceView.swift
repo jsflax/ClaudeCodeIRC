@@ -100,12 +100,12 @@ struct WorkspaceView: View {
         // Tab — slash-complete when the draft starts with `/`, nick-
         // complete otherwise. TextField lets Tab bubble to us.
         .onKeyPress(9) { handleTab() }
-        .onKeyPress(Int32(UInt8(ascii: "Y"))) { decide(.approved, persist: false) }
-        .onKeyPress(Int32(UInt8(ascii: "y"))) { decide(.approved, persist: false) }
-        .onKeyPress(Int32(UInt8(ascii: "A"))) { decide(.approved, persist: true) }
-        .onKeyPress(Int32(UInt8(ascii: "a"))) { decide(.approved, persist: true) }
-        .onKeyPress(Int32(UInt8(ascii: "D"))) { decide(.denied,   persist: false) }
-        .onKeyPress(Int32(UInt8(ascii: "d"))) { decide(.denied,   persist: false) }
+        .onKeyPress(Int32(UInt8(ascii: "Y"))) { castVote(.approved) }
+        .onKeyPress(Int32(UInt8(ascii: "y"))) { castVote(.approved) }
+        .onKeyPress(Int32(UInt8(ascii: "D"))) { castVote(.denied) }
+        .onKeyPress(Int32(UInt8(ascii: "d"))) { castVote(.denied) }
+        .onKeyPress(Int32(UInt8(ascii: "A"))) { alwaysAllow() }
+        .onKeyPress(Int32(UInt8(ascii: "a"))) { alwaysAllow() }
         .onKeyPress(Int32(KEY_BTAB)) {
             // Shift-Tab cycles permission mode on the host — peers see
             // whatever the host sets via Session sync.
@@ -176,13 +176,18 @@ struct WorkspaceView: View {
     }
 
     private var inputFocusBinding: Binding<Bool> {
-        // Unfocus the TextField while a form overlay is visible OR a
-        // pending approval awaits a host keypress — in both cases we
-        // want Y/A/D/ESC to bubble past TextField to the root hotkey
-        // handlers instead of being typed into the draft.
+        // Defocus the TextField so Y/A/D/ESC bubble past it when:
+        //   (a) a form overlay is visible — it owns key handling
+        //   (b) an approval is pending AND the draft is empty —
+        //       the user isn't mid-typing, so their keystrokes are
+        //       votes. Once they start typing (draft non-empty),
+        //       TextField reclaims keys so they can finish the word.
         Binding(
-            get: { !(hostFormVisible || joinFormVisible)
-                && !(pendingApproval != nil && (model.activeRoom?.isHost ?? false)) },
+            get: {
+                if hostFormVisible || joinFormVisible { return false }
+                if pendingApproval != nil && draft.isEmpty { return false }
+                return true
+            },
             set: { _ in })
     }
 
@@ -295,30 +300,49 @@ struct WorkspaceView: View {
         room.lattice.add(msg)
     }
 
-    /// Mutate the oldest `.pending` approval on the active room so the
-    /// shim's change observer wakes up. [A] persists a sticky
-    /// `ApprovalPolicy` in addition; peers pressing [A] no-op (only
-    /// the host can always-allow).
+    /// Cast a vote as the active member on the oldest `.pending`
+    /// approval. Any member can vote (hosts + peers). The shim
+    /// wakes up only once `ApprovalVoteCoordinator` tips status out
+    /// of `.pending` via the tally; we never flip status here
+    /// directly.
     ///
-    /// D6 replaces this with democratic voting via `ApprovalVote` +
-    /// `ApprovalTally` — for this landing the host still flips status
-    /// directly so the existing shim path keeps working.
-    private func decide(_ status: ApprovalStatus, persist: Bool) {
-        guard let room = model.activeRoom, room.isHost else { return }
-        let pending = room.lattice.objects(ApprovalRequest.self)
-            .sortedBy(SortDescriptor(\.requestedAt, order: .forward))
-            .first { $0.status == .pending }
-        guard let req = pending else { return }
-        req.status = status
+    /// Re-voting overwrites the prior vote: LatticeCore enforces the
+    /// compound unique on (voter, request), so we delete any existing
+    /// vote row by this member for this request before inserting the
+    /// new one — Y→D and D→Y both work without resurrecting the old
+    /// count.
+    private func castVote(_ decision: ApprovalStatus) {
+        guard let room = model.activeRoom,
+              let voter = room.selfMember,
+              let req = pendingApproval else { return }
+        for existing in req.votes where existing.voter?.globalId == voter.globalId {
+            room.lattice.delete(existing)
+        }
+        let vote = ApprovalVote()
+        vote.voter = voter
+        vote.request = req
+        vote.decision = decision
+        room.lattice.add(vote)
+        Log.line("workspace", "\(voter.nick) voted \(decision) on \(req.toolName)")
+    }
+
+    /// Host-only always-allow: writes an `ApprovalPolicy` row so
+    /// subsequent calls to the same tool bypass the approval flow,
+    /// and commits the current request's status directly (skipping
+    /// the vote). Peers pressing [A] no-op — policies authoritatively
+    /// come from the host.
+    private func alwaysAllow() {
+        guard let room = model.activeRoom, room.isHost,
+              let req = pendingApproval else { return }
+        let policy = ApprovalPolicy()
+        policy.toolName = req.toolName
+        policy.decision = .approved
+        policy.decidedBy = room.selfMember
+        room.lattice.add(policy)
+        req.status = .approved
         req.decidedAt = Date()
         req.decidedBy = room.selfMember
-        if persist {
-            let policy = ApprovalPolicy()
-            policy.toolName = req.toolName
-            policy.decision = status
-            policy.decidedBy = room.selfMember
-            room.lattice.add(policy)
-        }
+        Log.line("workspace", "always-allow for tool \(req.toolName)")
     }
 }
 

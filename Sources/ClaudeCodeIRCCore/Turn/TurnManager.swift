@@ -35,6 +35,12 @@ public actor TurnManager: TurnManaging {
     private var interTurn: [ChatMessage] = []
     private var streaming: Bool = false
     private var turnObserver: AnyCancellable?
+    /// Global IDs of ChatMessage rows we've already observed via
+    /// `ingest`. Guards against duplicate-observer fan-out on the
+    /// same row (shouldn't happen in normal flow, but has been seen
+    /// in the wild producing ghost second `@claude` responses when
+    /// the row got re-ingested after turn completion).
+    private var seenGlobalIds: Set<UUID> = []
 
     /// `init` is async because resolving the Lattice + Session off
     /// `SendableReference`s must happen inside the actor's isolation
@@ -62,6 +68,12 @@ public actor TurnManager: TurnManaging {
     /// caller hands over a `globalId`; we resolve the row inside the
     /// actor.
     public func ingest(globalId: UUID) async {
+        // Idempotent: bail on double-ingest. Defends against the
+        // observer firing twice for one row.
+        guard seenGlobalIds.insert(globalId).inserted else {
+            Log.line("turn-mgr", "ignoring duplicate ingest globalId=\(globalId)")
+            return
+        }
         guard let msg = lattice.object(ChatMessage.self, globalId: globalId)
         else { return }
         // Assistant chunks live on a different table; system/side

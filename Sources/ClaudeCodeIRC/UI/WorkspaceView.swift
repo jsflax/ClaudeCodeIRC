@@ -20,6 +20,7 @@ struct WorkspaceView: View {
     @State private var hostFormVisible: Bool = false
     @State private var joinFormVisible: Bool = false
     @State private var pendingJoin: DiscoveredRoom?
+    @State private var paletteSelectorVisible: Bool = false
 
     @Query(sort: \ApprovalRequest.requestedAt) var approvals: TableResults<ApprovalRequest>
 
@@ -125,6 +126,11 @@ struct WorkspaceView: View {
                 model: model,
                 room: pendingJoin,
                 isPresented: $joinFormVisible)
+        }
+        .overlay(isPresented: $paletteSelectorVisible, dimsBackground: true) {
+            PaletteSelectorOverlay(
+                prefs: model.prefs,
+                isPresented: $paletteSelectorVisible)
         }
     }
 
@@ -264,7 +270,7 @@ struct WorkspaceView: View {
         if let me = room.selfMember, me.isAway {
             switch intent {
             case .afk: break // explicit toggle — handled below
-            case .empty, .unknown, .leave, .clear: break
+            case .empty, .unknown, .leave, .clear, .palette: break
             default:
                 me.isAway = false
                 me.awayReason = nil
@@ -321,6 +327,8 @@ struct WorkspaceView: View {
                     insertSystem(room: room, "\(me.nick) is away")
                 }
             }
+        case .palette:
+            paletteSelectorVisible = true
         case .unknown(let reason):
             insertSystem(room: room, "error: \(reason)")
         }

@@ -54,6 +54,11 @@ public enum InputRouter {
         /// brb coffee"). Passing nil or empty toggles back to present.
         case afk(String?)
 
+        /// Open the palette selector overlay. No arguments — the
+        /// overlay itself drives the pick. Caller flips a `@State`
+        /// flag on the root view to present the modal.
+        case palette
+
         /// Recognised slash prefix but unknown command — caller
         /// renders an error banner instead of treating as chat.
         case unknown(String)
@@ -117,6 +122,8 @@ public enum InputRouter {
             // `/afk` toggles; `/afk <reason>` sets the reason.
             // Empty `rest` is a legitimate toggle-off path.
             return .afk(rest.isEmpty ? nil : rest)
+        case "palette":
+            return .palette
         case "":
             // Bare "/" — treat as chat so users can type "/usr/bin"
             // without it disappearing into the parser.
@@ -144,6 +151,7 @@ public enum InputRouter {
         Command(name: "topic",   usage: "/topic <text>",   description: "set the session topic"),
         Command(name: "afk",     usage: "/afk [reason]",   description: "toggle away — excluded from vote quorum"),
         Command(name: "clear",   usage: "/clear",          description: "hide scrollback up to now (local)"),
+        Command(name: "palette", usage: "/palette",        description: "pick a UI palette — phosphor / amber / modern / claude"),
         Command(name: "leave",   usage: "/leave",          description: "leave the room"),
     ]
 
@@ -168,6 +176,7 @@ public enum InputRouter {
           /topic <text>      set the session topic
           /afk [reason]      toggle away — excluded from vote quorum
           /clear             hide scrollback up to now (local only)
+          /palette           pick a UI palette
           /leave             leave the room
         trigger Claude:
           @claude <prompt>   mention to ask Claude (case-insensitive)

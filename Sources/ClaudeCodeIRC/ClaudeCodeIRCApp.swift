@@ -14,9 +14,19 @@ struct RootView: View {
         // already installed. Applying env inside a view's own body is
         // too late.
         let activeLattice = model.activeRoom?.lattice ?? LatticeKey.defaultValue
+        let palette = model.prefs.paletteId.palette
         return WorkspaceView(model: model)
             .environment(\.lattice, activeLattice)
-            .environment(\.palette, model.prefs.paletteId.palette)
+            .environment(\.palette, palette)
+            // Rebind ncurses color pairs when the user picks a palette.
+            // `.task(id:)` cancels + re-fires when the id changes, and
+            // `PaletteRegistrar.activate` is idempotent so running it
+            // on first appear is fine. Body is sync — the Task wrapper
+            // just anchors lifecycle.
+            .task(id: model.prefs.paletteId) {
+                PaletteRegistrar.activate(palette)
+                Log.line("app", "palette activated → \(palette.name)")
+            }
     }
 }
 

@@ -172,4 +172,13 @@ import ClaudeCodeIRCCore
     @Test func afkCaseInsensitive() {
         #expect(InputRouter.parse("/AFK") == .afk(nil))
     }
+
+    // MARK: - /palette
+
+    @Test func paletteIsParsed() {
+        #expect(InputRouter.parse("/palette") == .palette)
+        #expect(InputRouter.parse("/PALETTE") == .palette)
+        // Args ignored — the overlay drives the pick.
+        #expect(InputRouter.parse("/palette claude") == .palette)
+    }
 }

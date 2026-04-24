@@ -245,17 +245,59 @@ struct RoomView: View {
     }
 
     private func send() {
-        let text = draft
-        guard !text.isEmpty,
-              let author = model.selfMember,
-              let session = model.session
+        let raw = draft
+        draft = ""
+        let intent = InputRouter.parse(raw)
+        switch intent {
+        case .empty:
+            return
+        case .message(let text, let side):
+            insertChat(text: text, kind: .user, side: side)
+        case .setNick(let name):
+            // Updates the `Member.nick` cell on this room's Lattice
+            // (syncs to peers as a normal audit-log entry) and
+            // persists on the prefs Lattice so the next launch picks
+            // up the new nick.
+            model.selfMember?.nick = name
+            model.prefs?.nick = name
+            insertSystem("nick set to \(name)")
+        case .help:
+            insertSystem(InputRouter.helpText)
+        case .members:
+            let nicks = Array(members)
+                .sorted { $0.joinedAt < $1.joinedAt }
+                .map { $0.isHost ? "\($0.nick) (host)" : $0.nick }
+                .joined(separator: ", ")
+            insertSystem("members: \(nicks.isEmpty ? "(none)" : nicks)")
+        case .leave:
+            onLeave()
+        case .unknown(let reason):
+            insertSystem("error: \(reason)")
+        }
+    }
+
+    private func insertChat(text: String, kind: MessageKind, side: Bool) {
+        guard let author = model.selfMember, let session = model.session
         else { return }
         let msg = ChatMessage()
         msg.text = text
-        msg.kind = .user
+        msg.kind = kind
+        msg.side = side
         msg.author = author
         msg.session = session
         model.lattice.add(msg)
-        draft = ""
+    }
+
+    /// Local-only system message (e.g. `/help` output, unknown-command
+    /// errors). Not authored by any Member — renders in its own dimmed
+    /// style once MessageListView lands.
+    private func insertSystem(_ text: String) {
+        guard let session = model.session else { return }
+        let msg = ChatMessage()
+        msg.text = text
+        msg.kind = .system
+        msg.side = true  // exclude from Claude's prompt context
+        msg.session = session
+        model.lattice.add(msg)
     }
 }

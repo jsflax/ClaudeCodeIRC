@@ -23,12 +23,24 @@ public final class RoomModel {
     public let server: RoomSyncServer?
     public let publisher: BonjourPublisher?
     /// Host-only. The `claude` subprocess driver. Created eagerly on
-    /// `host(...)`; `send(prompt:)` forwards to it. Peers talk to
-    /// Claude via the host's Lattice rows — they have no local driver.
+    /// `host(...)`; the TurnManager drives it. Peers talk to Claude
+    /// via the host's Lattice rows — they have no local driver.
     public let driver: (any ClaudeDriver)?
+    /// Host-only. Accumulates `ChatMessage` inserts, fires the driver
+    /// on `@claude` mentions with the surrounding room context, and
+    /// queues in-flight arrivals until the current Turn completes.
+    /// Protocol-typed so tests can substitute a fake without real
+    /// subprocess / Lattice plumbing.
+    public let turnManager: (any TurnManaging)?
+    /// Cross-launch preferences (nick, last cwd). Threaded from
+    /// `LobbyModel` so `/nick` inside the room persists for the next
+    /// session. Lives on a different Lattice file from the room
+    /// itself — writing `prefs.nick = name` commits to
+    /// `prefs.lattice`.
+    public let prefs: AppPreferences?
 
     private var catchUpTask: Task<Void, Never>?
-    private var mentionObserver: AnyCancellable?
+    private var chatObserver: AnyCancellable?
 
     /// Host-side factory — Session + Member rows already inserted by caller.
     public static func host(
@@ -38,7 +50,9 @@ public final class RoomModel {
         joinCode: String?,
         server: RoomSyncServer,
         publisher: BonjourPublisher,
-        driver: (any ClaudeDriver)
+        driver: (any ClaudeDriver),
+        turnManager: any TurnManaging,
+        prefs: AppPreferences
     ) -> RoomModel {
         let model = RoomModel(
             lattice: lattice,
@@ -47,8 +61,10 @@ public final class RoomModel {
             joinCode: joinCode,
             server: server,
             publisher: publisher,
-            driver: driver)
-        model.startClaudeMentionObserver()
+            driver: driver,
+            turnManager: turnManager,
+            prefs: prefs)
+        model.startChatObserver()
         return model
     }
 
@@ -61,7 +77,8 @@ public final class RoomModel {
         lattice: Lattice,
         roomCode: String,
         joinCode: String?,
-        nick: String
+        nick: String,
+        prefs: AppPreferences
     ) -> RoomModel {
         Log.line("room-peer", "creating peer nick=\(nick) roomCode=\(roomCode)")
         let me = Member()
@@ -77,7 +94,9 @@ public final class RoomModel {
             joinCode: joinCode,
             server: nil,
             publisher: nil,
-            driver: nil)
+            driver: nil,
+            turnManager: nil,
+            prefs: prefs)
         model.startPeerCatchUp(roomCode: roomCode)
         return model
     }
@@ -89,7 +108,9 @@ public final class RoomModel {
         joinCode: String?,
         server: RoomSyncServer?,
         publisher: BonjourPublisher?,
-        driver: (any ClaudeDriver)?
+        driver: (any ClaudeDriver)?,
+        turnManager: (any TurnManaging)?,
+        prefs: AppPreferences?
     ) {
         self.lattice = lattice
         self.session = session
@@ -98,6 +119,8 @@ public final class RoomModel {
         self.server = server
         self.publisher = publisher
         self.driver = driver
+        self.turnManager = turnManager
+        self.prefs = prefs
     }
 
     private func startPeerCatchUp(roomCode: String) {
@@ -135,43 +158,39 @@ public final class RoomModel {
 
     public func leave() async {
         catchUpTask?.cancel()
-        mentionObserver?.cancel()
+        chatObserver?.cancel()
         if let driver { await driver.stop() }
         if let server { try? await server.stop() }
         publisher?.stop()
     }
 
-    // MARK: - Host-side @claude trigger
+    // MARK: - Host-side chat observer → TurnManager
 
-    /// Host-only. Observes the `ChatMessage` table directly — both
-    /// local writes and peer uploads land as `.insert` notifications
-    /// here. On a mention, forward the message as a single-turn prompt
-    /// to the `claude` subprocess. P5's TurnManager will replace this
-    /// with multi-message intra-turn assembly and inter-turn queueing;
-    /// for now the goal is a working end-to-end path.
-    private func startClaudeMentionObserver() {
-        guard driver != nil else { return }
-        Log.line("room-host", "@claude observer starting")
-        mentionObserver = lattice.observe(ChatMessage.self) { @Sendable [weak self] change in
+    /// Host-only. Every `ChatMessage` insert (local write or peer
+    /// upload) forwards to `TurnManager.ingest`. The manager decides
+    /// whether to buffer, fire the driver, or queue for after the
+    /// current turn. Filtering — `.side`, `.system`, assistant-
+    /// authored messages — happens inside `TurnManager`.
+    ///
+    /// We forward `globalId` (a `UUID`) rather than the model ref
+    /// because the observer callback is `@Sendable`; the manager
+    /// re-resolves the row on its own isolation.
+    private func startChatObserver() {
+        guard turnManager != nil else { return }
+        Log.line("room-host", "turn-manager chat observer starting")
+        chatObserver = lattice.observe(ChatMessage.self) { @Sendable [weak self] change in
             guard case .insert(let rowId) = change else { return }
             Task { [weak self] in
-                await self?.handleInsertedChatMessage(rowId: rowId)
+                await self?.forwardToTurnManager(rowId: rowId)
             }
         }
     }
 
-    private func handleInsertedChatMessage(rowId: Int64) async {
+    private func forwardToTurnManager(rowId: Int64) async {
         guard let msg = lattice.object(ChatMessage.self, primaryKey: rowId),
-              msg.kind == .user,
-              !msg.side,
-              ClaudeMention.matches(msg.text),
-              let driver
+              let gid = msg.globalId,
+              let turnManager
         else { return }
-        let nick = msg.author?.nick ?? "?"
-        let prompt = "\(nick): \(msg.text)"
-        let ref = msg.sendableReference
-        Log.line("room-host", "@claude fire nick=\(nick) text=\(msg.text.prefix(80))")
-        do { try await driver.send(prompt: prompt, promptMessageRef: ref) }
-        catch { Log.line("room-host", "driver.send failed: \(error)") }
+        await turnManager.ingest(globalId: gid)
     }
 }

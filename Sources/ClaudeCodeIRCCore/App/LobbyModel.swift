@@ -101,6 +101,12 @@ public final class LobbyModel {
             cwd: cwd)
         Log.line("lobby", "claude driver constructed for cwd=\(cwd) mode=\(mode)")
 
+        let turnManager = try await TurnManager(
+            driver: driver,
+            latticeRef: lattice.sendableReference,
+            sessionRef: session.sendableReference)
+        Log.line("lobby", "turn manager constructed")
+
         prefs.lastCwd = cwd
 
         return RoomModel.host(
@@ -110,7 +116,9 @@ public final class LobbyModel {
             joinCode: joinCode,
             server: server,
             publisher: publisher,
-            driver: driver)
+            driver: driver,
+            turnManager: turnManager,
+            prefs: prefs)
     }
 
     /// Join an existing room. `joinCode` is `nil` for open rooms; a
@@ -126,7 +134,8 @@ public final class LobbyModel {
             lattice: lattice,
             roomCode: room.roomCode,
             joinCode: joinCode,
-            nick: prefs.nick)
+            nick: prefs.nick,
+            prefs: prefs)
     }
 
     // 6-char Crockford-base32ish code (no 0/O/1/I/L/U ambiguity).

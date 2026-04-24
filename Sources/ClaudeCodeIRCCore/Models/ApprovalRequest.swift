@@ -23,4 +23,9 @@ public final class ApprovalRequest {
 
     /// Member who clicked approve/deny. nil while pending.
     public var decidedBy: Member?
+
+    /// Individual votes cast against this request. `ApprovalTally` consumes
+    /// this to decide when the aggregate outcome has landed.
+    @Relation(link: \ApprovalVote.request)
+    public var votes: any Results<ApprovalVote>
 }

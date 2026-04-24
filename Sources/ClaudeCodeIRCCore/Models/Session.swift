@@ -10,6 +10,10 @@ public final class Session {
     public var permissionMode: PermissionMode = .acceptEdits
     public var createdAt: Date = Date()
 
+    /// Session topic — set via `/topic <text>`, rendered in the top bar.
+    /// `nil` means no topic has been set yet.
+    public var topic: String? = nil
+
     /// UUID we pass to every `claude -p --session-id <uuid>` spawn so
     /// claude persists conversation state across prompts — without
     /// this, every `@claude` mention is a blank slate. Assigned by

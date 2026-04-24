@@ -11,4 +11,8 @@ public final class AppPreferences {
     public var key: String = "singleton"
     public var nick: String = ""
     public var lastCwd: String = ""
+
+    /// Active palette — picked via the palette selector overlay and
+    /// restored on next launch.
+    public var paletteId: PaletteId = .phosphor
 }

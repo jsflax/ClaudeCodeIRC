@@ -21,6 +21,7 @@ public enum RoomStore {
         ToolEvent.self,
         ApprovalRequest.self,
         ApprovalPolicy.self,
+        ApprovalVote.self,
         HostHandoff.self,
     ]
 

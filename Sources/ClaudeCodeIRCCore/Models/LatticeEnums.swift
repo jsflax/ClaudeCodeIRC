@@ -1,4 +1,5 @@
 import Lattice
+import NCursesUI
 
 @LatticeEnum
 public enum TurnStatus: String, Codable, Sendable {
@@ -7,7 +8,23 @@ public enum TurnStatus: String, Codable, Sendable {
 
 @LatticeEnum
 public enum MessageKind: String, Codable, Sendable {
-    case user, assistant, system
+    case user, assistant, system, action
+}
+
+/// Built-in palette selection. Persisted on `AppPreferences.paletteId`.
+@LatticeEnum
+public enum PaletteId: String, Codable, Sendable, CaseIterable {
+    case phosphor, amber, modern, claude
+
+    /// Bridge to the NCursesUI `Palette` theme.
+    public var palette: Palette {
+        switch self {
+        case .phosphor: return .phosphor
+        case .amber:    return .amber
+        case .modern:   return .modern
+        case .claude:   return .claude
+        }
+    }
 }
 
 @LatticeEnum

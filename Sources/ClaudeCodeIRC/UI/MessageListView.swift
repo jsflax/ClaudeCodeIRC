@@ -3,13 +3,13 @@ import Foundation
 import class Lattice.TableResults
 import NCursesUI
 
-/// Time-merged stream of user/system chat messages and assistant
-/// chunks in the active room. Replaces the inline ForEach that used
-/// to live on RoomView; the richer rendering (code blocks, diff
-/// cards, per-nick colors) lands in D6/D8.
+/// Time-merged stream of user/system chat messages, assistant chunks,
+/// and approval cards for the active room. Reads via `@Query` so
+/// peer uploads and local writes trigger re-renders automatically.
 ///
-/// Reads both Lattice tables through `@Query` — the view re-renders
-/// automatically when a peer upload or local write changes either.
+/// Message bodies pass through `MessageBodyParser` at render time —
+/// fenced code blocks become `CodeBlockView`s, unified diffs become
+/// `DiffBlockView`s, plain prose stays as a single-line Text run.
 struct MessageListView: View {
     let isHost: Bool
     /// Local-only scrollback cutoff set by `/clear`. Events with
@@ -45,9 +45,7 @@ struct MessageListView: View {
     }
 }
 
-/// Unified event stream for the scrollback. Proper tool-event rows +
-/// turn separators land in later phases; this covers the primary
-/// chat + assistant + approval-card mix.
+/// Unified event stream for the scrollback.
 enum RoomEvent: Identifiable {
     case message(ChatMessage)
     case chunk(AssistantChunk)
@@ -70,82 +68,140 @@ enum RoomEvent: Identifiable {
     }
 }
 
-/// One row in the scrollback. Time prefix, author (colored), body.
-/// System messages render as `-- <body>`; action messages (`/me`)
-/// italic-accented; assistant chunks prefixed with `@claude`.
+/// One row in the scrollback. Header (time + author) + body, where
+/// the body is `MessageBodyParser.segments(...)` rendered as Text
+/// runs for `.text` segments and dedicated views for `.code` / `.diff`.
 struct MessageRow: View {
     let event: RoomEvent
 
-    var body: some View {
+    @ViewBuilder var body: some View {
         switch event {
         case .message(let m):
-            return rowFor(m)
+            messageBody(m)
         case .chunk(let c):
-            return chunkRow(c)
+            chunkBody(c)
         case .approval:
             // Approval rows render via ApprovalCardView in the parent —
             // MessageRow is the text-row fallback. Emit a dim marker so
-            // the row slot isn't empty if the parent ever forgets to
+            // the slot isn't empty if the parent ever forgets to
             // branch on .approval.
-            return Text("[approval card]").foregroundColor(.dim)
+            Text("[approval card]").foregroundColor(.dim)
         }
     }
 
-    private func rowFor(_ m: ChatMessage) -> Text {
+    // MARK: - Message / chunk assembly
+
+    @ViewBuilder private func messageBody(_ m: ChatMessage) -> some View {
         let t = Self.timeString(m.createdAt)
         switch m.kind {
         case .system:
-            var line = Text("\(t) ").foregroundColor(.dim)
-            line = line + Text("-- ").foregroundColor(.dim)
-            line = line + Text(m.text).foregroundColor(.dim)
-            return line
+            systemLine(time: t, text: m.text)
         case .action:
-            var line = Text("\(t) * ").foregroundColor(.dim)
-            line = line + Text("\(m.author?.nick ?? "?") ").foregroundColor(.cyan)
-            line = line + Text(m.text).foregroundColor(.cyan)
-            return line
+            actionLine(time: t, nick: m.author?.nick ?? "?", text: m.text)
         case .user, .assistant:
-            var line = Text("\(t) ").foregroundColor(.dim)
-            line = line + Text("<\(m.author?.nick ?? "?")> ").foregroundColor(.cyan).bold()
-            line = line + highlightedBody(m.text)
-            return line
+            authoredBody(
+                time: t,
+                nick: m.author?.nick ?? "?",
+                nickColor: .cyan,
+                text: m.text)
         }
     }
 
-    private func chunkRow(_ c: AssistantChunk) -> Text {
-        let t = Self.timeString(c.createdAt)
-        var line = Text("\(t) ").foregroundColor(.dim)
-        line = line + Text("<@claude> ").foregroundColor(.yellow).bold()
-        line = line + Text(c.text)
+    @ViewBuilder private func chunkBody(_ c: AssistantChunk) -> some View {
+        authoredBody(
+            time: Self.timeString(c.createdAt),
+            nick: "@claude",
+            nickColor: .yellow,
+            text: c.text)
+    }
+
+    // MARK: - Line shapes
+
+    private func systemLine(time: String, text: String) -> Text {
+        var line = Text("\(time) ").foregroundColor(.dim)
+        line = line + Text("-- ").foregroundColor(.dim)
+        line = line + Text(text).foregroundColor(.dim)
         return line
     }
 
-    /// Highlight `@claude`, `@claude-sonnet`, `@claude-haiku` mentions
-    /// inline — accent-colored + bold, no background fill (the design
-    /// iterated away from reverse-video chips).
-    private func highlightedBody(_ text: String) -> Text {
-        let pattern = #"@claude(?:-sonnet|-haiku)?\b"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return Text(text)
+    private func actionLine(time: String, nick: String, text: String) -> Text {
+        var line = Text("\(time) * ").foregroundColor(.dim)
+        line = line + Text("\(nick) ").foregroundColor(.cyan)
+        line = line + Text(text).foregroundColor(.cyan)
+        return line
+    }
+
+    /// Render header (`HH:MM <nick>`) + body. The body is parsed into
+    /// segments; single-text bodies stay on the header line,
+    /// multi-segment bodies break onto separate rows so code / diff
+    /// blocks get their own framed real-estate.
+    @ViewBuilder
+    private func authoredBody(
+        time: String,
+        nick: String,
+        nickColor: Color,
+        text: String
+    ) -> some View {
+        let segments = MessageBodyParser.segments(text)
+        let inlineOnly = segments.allSatisfy {
+            if case .text = $0 { return true }; return false
         }
-        let ns = text as NSString
-        var cursor = 0
-        var out = Text("")
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
-        for m in matches {
-            let r = m.range
-            if r.location > cursor {
-                out = out + Text(ns.substring(with: NSRange(
-                    location: cursor, length: r.location - cursor)))
+        if inlineOnly {
+            // Fast path — all text, render on a single (word-wrapped) row.
+            headerPlusInline(time: time, nick: nick, nickColor: nickColor, text: text)
+        } else {
+            VStack(spacing: 0) {
+                headerPlusInline(
+                    time: time, nick: nick, nickColor: nickColor,
+                    text: leadingText(of: segments))
+                ForEach(Array(remainingSegments(of: segments).enumerated())
+                    .map { IndexedSegment(index: $0.offset, segment: $0.element) }
+                ) { pair in
+                    SegmentView(segment: pair.segment)
+                }
             }
-            out = out + Text(ns.substring(with: r))
+        }
+    }
+
+    private func headerPlusInline(
+        time: String, nick: String, nickColor: Color, text: String
+    ) -> Text {
+        var line = Text("\(time) ").foregroundColor(.dim)
+        line = line + Text("<\(nick)> ").foregroundColor(nickColor).bold()
+        line = line + highlightedBody(text)
+        return line
+    }
+
+    /// First `.text` segment if the body starts with one — that's
+    /// what goes on the header row. Subsequent segments render
+    /// below.
+    private func leadingText(of segments: [BodySegment]) -> String {
+        if case .text(let s) = segments.first { return s }
+        return ""
+    }
+
+    private func remainingSegments(of segments: [BodySegment]) -> [BodySegment] {
+        guard case .text = segments.first else { return segments }
+        return Array(segments.dropFirst())
+    }
+
+    /// Highlight `@claude`, `@claude-sonnet`, `@claude-haiku` mentions
+    /// inline — accent-colored + bold.
+    private func highlightedBody(_ text: String) -> Text {
+        let mention = #/@claude(?:-sonnet|-haiku)?\b/#
+        var out = Text("")
+        var cursor = text.startIndex
+        for match in text.matches(of: mention) {
+            if match.range.lowerBound > cursor {
+                out = out + Text(String(text[cursor..<match.range.lowerBound]))
+            }
+            out = out + Text(String(text[match.range]))
                 .foregroundColor(.yellow)
                 .bold()
-            cursor = r.location + r.length
+            cursor = match.range.upperBound
         }
-        if cursor < ns.length {
-            out = out + Text(ns.substring(with: NSRange(
-                location: cursor, length: ns.length - cursor)))
+        if cursor < text.endIndex {
+            out = out + Text(String(text[cursor..<text.endIndex]))
         }
         return out
     }
@@ -154,5 +210,32 @@ struct MessageRow: View {
         let f = DateFormatter()
         f.dateFormat = "HH:mm"
         return f.string(from: d)
+    }
+}
+
+/// Tiny Identifiable wrapper so ForEach can iterate an enumerated
+/// sequence of BodySegments. Segments themselves aren't Identifiable
+/// (they're enum payload-wrapped Strings / structs, no natural id).
+private struct IndexedSegment: Identifiable {
+    let index: Int
+    let segment: BodySegment
+    var id: Int { index }
+}
+
+/// Renders a single non-text BodySegment (code or diff) as its
+/// dedicated view. Text segments handled directly by `MessageRow`
+/// to keep the header-line fast path.
+private struct SegmentView: View {
+    let segment: BodySegment
+
+    @ViewBuilder var body: some View {
+        switch segment {
+        case .text(let s):
+            Text(s)
+        case .code(let lang, let filename, let body):
+            CodeBlockView(lang: lang, filename: filename, source: body)
+        case .diff(let file, let patch):
+            DiffBlockView(file: file, patch: patch)
+        }
     }
 }

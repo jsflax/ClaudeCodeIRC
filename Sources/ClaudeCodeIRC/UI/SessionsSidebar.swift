@@ -1,6 +1,17 @@
 import ClaudeCodeIRCCore
 import NCursesUI
 
+/// Build a sidebar divider label that fills `width` cols: `── <label> `
+/// followed by as many `─` as fit. Matches the panel-header look from
+/// the JSX handoff without hardcoding a trailing dash count per call
+/// site (previously `── sessions (1) ────────` capped at 8 trailing
+/// dashes regardless of sidebar width).
+func fillRule(_ label: String, width: Int) -> String {
+    let prefix = "── \(label) "
+    let fill = max(0, width - prefix.count)
+    return prefix + String(repeating: "─", count: fill)
+}
+
 /// Left column of the workspace. Shows two groups:
 ///   1. Joined rooms — one row per `RoomInstance` in `model.joinedRooms`,
 ///      active row reverse-videoed. Alt+1..9 also maps here.
@@ -12,6 +23,10 @@ import NCursesUI
 /// hotkey strip; the actual overlay mount lives in `WorkspaceView`.
 struct SessionsSidebar: View {
     let model: RoomsModel
+    /// Width the parent pinned via `.frame(width:)`. Drives the
+    /// divider-fill length so the `── label ────` rule spans the full
+    /// sidebar instead of a fixed dash count.
+    let width: Int
     @Environment(\.palette) var palette
 
     /// Rooms the browser found on the LAN that we haven't already
@@ -23,7 +38,7 @@ struct SessionsSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text("── sessions (\(model.joinedRooms.count)) ────────")
+            Text(fillRule("sessions (\(model.joinedRooms.count))", width: width))
                 .foregroundColor(.dim)
 
             ForEach(Array(model.joinedRooms.indices)) { idx in
@@ -34,7 +49,7 @@ struct SessionsSidebar: View {
             }
 
             SpacerView(1)
-            Text("── discovered ─────").foregroundColor(.dim)
+            Text(fillRule("discovered", width: width)).foregroundColor(.dim)
 
             ForEach(discoveredUnjoined) { room in
                 DiscoveredRow(room: room)

@@ -8,6 +8,7 @@ import NCursesUI
 /// process, not in Lattice). AFK members dim + `(afk)` suffix.
 struct UsersSidebar: View {
     let room: RoomInstance
+    let width: Int
 
     @Query(sort: \Member.joinedAt) var members: TableResults<Member>
     @Environment(\.palette) var palette
@@ -15,7 +16,7 @@ struct UsersSidebar: View {
     var body: some View {
         let realMembers = Array(members)
         return VStack(spacing: 0) {
-            Text("── users ── \(realMembers.count + 1) ──")
+            Text(fillRule("users (\(realMembers.count + 1))", width: width))
                 .foregroundColor(.dim)
 
             // Synthetic claude entry. Both host and peers show this —

@@ -89,12 +89,14 @@ struct WorkspaceView: View {
         return VStack(spacing: 0) {
             TopBar(model: model)
             HStack(spacing: 0) {
-                SessionsSidebar(model: model).frame(width: leftWidth)
-                Text("│").foregroundColor(.dim)
+                SessionsSidebar(model: model, width: leftWidth)
+                    .frame(width: leftWidth)
+                VLineView()
                 centerPane.frame(width: centerWidth)
-                Text("│").foregroundColor(.dim)
+                VLineView()
                 if let room = model.activeRoom {
-                    UsersSidebar(room: room).frame(width: rightWidth)
+                    UsersSidebar(room: room, width: rightWidth)
+                        .frame(width: rightWidth)
                 } else {
                     EmptyView().frame(width: rightWidth)
                 }
@@ -635,14 +637,18 @@ struct RoomPane: View {
 
     @Query(sort: \Turn.startedAt) var turns: TableResults<Turn>
 
-    private var scrollHeight: Int {
-        // Terminal rows minus fixed chrome (top bar + status + input +
-        // hotkey strip + 2 HLine rules ≈ 6).
-        max(1, Term.rows - 6)
-    }
-
     private var streamingTurn: Turn? {
         turns.first { $0.status == .streaming }
+    }
+
+    /// ScrollView reserves the pane's full height minus the title
+    /// strip (1) and, when claude is streaming, the thinking strip
+    /// (1). Without shrinking here, the ScrollView eats the pane and
+    /// the ClaudeThinkingView gets 0 rows → invisible.
+    private var scrollHeight: Int {
+        let paneHeight = Term.rows - 6 // chrome: topbar+hline+status+input+hotkey+pad
+        let thinking = streamingTurn != nil ? 1 : 0
+        return max(1, paneHeight - 1 /* title strip */ - thinking)
     }
 
     var body: some View {

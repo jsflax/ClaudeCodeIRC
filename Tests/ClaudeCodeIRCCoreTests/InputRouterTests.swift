@@ -126,4 +126,50 @@ import ClaudeCodeIRCCore
     @Test func completionsReturnEmptyOnNonMatch() {
         #expect(InputRouter.completions(forPrefix: "zzz").isEmpty)
     }
+
+    // MARK: - /clear /topic /me /afk
+
+    @Test func clearIsParsed() {
+        #expect(InputRouter.parse("/clear") == .clear)
+        #expect(InputRouter.parse("/CLEAR") == .clear)
+        // Trailing noise is trimmed — /clear ignores args.
+        #expect(InputRouter.parse("/clear now") == .clear)
+    }
+
+    @Test func topicWithBodyIsParsed() {
+        #expect(InputRouter.parse("/topic Add WebAuthn + backup codes")
+            == .setTopic("Add WebAuthn + backup codes"))
+    }
+
+    @Test func bareTopicIsRejected() {
+        guard case .unknown(let msg) = InputRouter.parse("/topic") else {
+            Issue.record("expected .unknown for bare /topic")
+            return
+        }
+        #expect(msg.contains("topic"))
+    }
+
+    @Test func meWithBodyIsAction() {
+        #expect(InputRouter.parse("/me opens the NIST doc")
+            == .action("opens the NIST doc"))
+    }
+
+    @Test func bareMeIsRejected() {
+        guard case .unknown = InputRouter.parse("/me") else {
+            Issue.record("expected .unknown for bare /me")
+            return
+        }
+    }
+
+    @Test func bareAfkTogglesWithNoReason() {
+        #expect(InputRouter.parse("/afk") == .afk(nil))
+    }
+
+    @Test func afkWithReasonIncludesText() {
+        #expect(InputRouter.parse("/afk brb coffee") == .afk("brb coffee"))
+    }
+
+    @Test func afkCaseInsensitive() {
+        #expect(InputRouter.parse("/AFK") == .afk(nil))
+    }
 }

@@ -62,6 +62,13 @@ public final class RoomInstance: Identifiable {
     /// than this. Updated by WorkspaceView on activation.
     public var lastSeenAt: Date = Date()
 
+    /// Local-only scrollback cutoff. Set by `/clear` to `Date.now` so
+    /// `MessageListView` hides everything authored before it; rows are
+    /// not deleted from the lattice, so peers still see them and the
+    /// filter doesn't sync. Persists only for the lifetime of this
+    /// `RoomInstance` — relaunching the app repopulates the scrollback.
+    public var scrollbackFloor: Date?
+
     private var catchUpTask: Task<Void, Never>?
     private var chatObserver: AnyCancellable?
 

@@ -12,6 +12,10 @@ import NCursesUI
 /// automatically when a peer upload or local write changes either.
 struct MessageListView: View {
     let isHost: Bool
+    /// Local-only scrollback cutoff set by `/clear`. Events with
+    /// timestamps at or before this are hidden in this client; rows
+    /// stay in the lattice so sync is unaffected.
+    let scrollbackFloor: Date?
 
     @Query(sort: \ChatMessage.createdAt) var messages: TableResults<ChatMessage>
     @Query(sort: \AssistantChunk.createdAt) var chunks: TableResults<AssistantChunk>
@@ -34,8 +38,10 @@ struct MessageListView: View {
         let chatEvents = messages.map { RoomEvent.message($0) }
         let chunkEvents = chunks.map { RoomEvent.chunk($0) }
         let approvalEvents = approvals.map { RoomEvent.approval($0) }
-        return (chatEvents + chunkEvents + approvalEvents)
+        let merged = (chatEvents + chunkEvents + approvalEvents)
             .sorted { $0.timestamp < $1.timestamp }
+        guard let floor = scrollbackFloor else { return merged }
+        return merged.filter { $0.timestamp > floor }
     }
 }
 

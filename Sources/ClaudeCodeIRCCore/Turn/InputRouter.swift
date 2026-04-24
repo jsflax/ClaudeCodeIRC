@@ -34,6 +34,26 @@ public enum InputRouter {
         /// on peer it just disconnects.
         case leave
 
+        /// Hide scrollback up to now in this client's view. Doesn't
+        /// delete any Lattice rows; a `scrollbackFloor: Date` on the
+        /// RoomInstance is set to `.now` and `MessageListView`
+        /// filters events below it.
+        case clear
+
+        /// Set the session topic. Syncs to peers as a `Session.topic`
+        /// update; host-side only semantic (peers can set it too but
+        /// host's last-writer-wins). Caller emits a system chat line.
+        case setTopic(String)
+
+        /// IRC-style action — renders "* <nick> <text>" italic-accent.
+        /// Caller writes a `ChatMessage` with kind `.action`.
+        case action(String)
+
+        /// Toggle self-AFK. `reason` is the optional blurb shown in
+        /// the users sidebar and the system message ("<you> is away:
+        /// brb coffee"). Passing nil or empty toggles back to present.
+        case afk(String?)
+
         /// Recognised slash prefix but unknown command — caller
         /// renders an error banner instead of treating as chat.
         case unknown(String)
@@ -85,6 +105,18 @@ public enum InputRouter {
             return .members
         case "leave":
             return .leave
+        case "clear":
+            return .clear
+        case "topic":
+            guard !rest.isEmpty else { return .unknown("/topic needs text") }
+            return .setTopic(rest)
+        case "me":
+            guard !rest.isEmpty else { return .unknown("/me needs text") }
+            return .action(rest)
+        case "afk":
+            // `/afk` toggles; `/afk <reason>` sets the reason.
+            // Empty `rest` is a legitimate toggle-off path.
+            return .afk(rest.isEmpty ? nil : rest)
         case "":
             // Bare "/" — treat as chat so users can type "/usr/bin"
             // without it disappearing into the parser.
@@ -108,6 +140,10 @@ public enum InputRouter {
         Command(name: "nick",    usage: "/nick <name>",    description: "change your nickname"),
         Command(name: "members", usage: "/members",        description: "list members in this room"),
         Command(name: "side",    usage: "/side <msg>",     description: "banter excluded from Claude's context"),
+        Command(name: "me",      usage: "/me <action>",    description: "emote — \"* <you> <action>\""),
+        Command(name: "topic",   usage: "/topic <text>",   description: "set the session topic"),
+        Command(name: "afk",     usage: "/afk [reason]",   description: "toggle away — excluded from vote quorum"),
+        Command(name: "clear",   usage: "/clear",          description: "hide scrollback up to now (local)"),
         Command(name: "leave",   usage: "/leave",          description: "leave the room"),
     ]
 
@@ -128,6 +164,10 @@ public enum InputRouter {
           /nick <name>       change your nickname
           /members           list members in this room
           /side <msg>        send chatter that's excluded from Claude's context
+          /me <action>       emote — "* <you> <action>"
+          /topic <text>      set the session topic
+          /afk [reason]      toggle away — excluded from vote quorum
+          /clear             hide scrollback up to now (local only)
           /leave             leave the room
         trigger Claude:
           @claude <prompt>   mention to ask Claude (case-insensitive)

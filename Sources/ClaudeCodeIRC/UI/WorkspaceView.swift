@@ -255,6 +255,23 @@ struct WorkspaceView: View {
         let raw = draft
         draft = ""
         let intent = InputRouter.parse(raw)
+
+        // AFK auto-clear: sending any non-system, non-afk content
+        // implicitly marks you back. Keeps the "away" state honest
+        // without requiring a second `/afk` to toggle off. Runs
+        // before the intent switch so the side-effecting cases
+        // (message / action / topic / members / help) all benefit.
+        if let me = room.selfMember, me.isAway {
+            switch intent {
+            case .afk: break // explicit toggle — handled below
+            case .empty, .unknown, .leave, .clear: break
+            default:
+                me.isAway = false
+                me.awayReason = nil
+                insertSystem(room: room, "\(me.nick) is back")
+            }
+        }
+
         switch intent {
         case .empty: return
         case .message(let text, let side):
@@ -266,14 +283,44 @@ struct WorkspaceView: View {
         case .help:
             insertSystem(room: room, InputRouter.helpText)
         case .members:
-            let nicks = Array(room.lattice.objects(Member.self))
-                .sorted { $0.joinedAt < $1.joinedAt }
+            // Ordering goes through a SortDescriptor so Lattice pushes
+            // the sort down into SQL rather than materialising every
+            // row and sorting in Swift.
+            let nicks = room.lattice.objects(Member.self)
+                .sortedBy(SortDescriptor(\.joinedAt, order: .forward))
                 .map { $0.isHost ? "\($0.nick) (host)" : $0.nick }
                 .joined(separator: ", ")
             insertSystem(room: room, "members: \(nicks.isEmpty ? "(none)" : nicks)")
         case .leave:
             let id = room.id
             Task { await model.leave(id) }
+        case .clear:
+            // Local-only scrollback hide. No Lattice write — floor
+            // lives on the RoomInstance and MessageListView reads
+            // it to gate rendering.
+            room.scrollbackFloor = Date()
+        case .setTopic(let text):
+            guard let session = room.session else { return }
+            session.topic = text
+            let nick = room.selfMember?.nick ?? "?"
+            insertSystem(room: room, "\(nick) set topic: \(text)")
+        case .action(let text):
+            insertChat(room: room, text: text, kind: .action, side: false)
+        case .afk(let reason):
+            guard let me = room.selfMember else { return }
+            if me.isAway {
+                me.isAway = false
+                me.awayReason = nil
+                insertSystem(room: room, "\(me.nick) is back")
+            } else {
+                me.isAway = true
+                me.awayReason = reason
+                if let r = reason {
+                    insertSystem(room: room, "\(me.nick) is away: \(r)")
+                } else {
+                    insertSystem(room: room, "\(me.nick) is away")
+                }
+            }
         case .unknown(let reason):
             insertSystem(room: room, "error: \(reason)")
         }
@@ -436,7 +483,9 @@ struct RoomPane: View {
         VStack(spacing: 0) {
             titleStrip
             ScrollView(height: scrollHeight) {
-                MessageListView(isHost: room.isHost)
+                MessageListView(
+                    isHost: room.isHost,
+                    scrollbackFloor: room.scrollbackFloor)
             }
             if let t = streamingTurn {
                 ClaudeThinkingView(turnId: t.globalId)

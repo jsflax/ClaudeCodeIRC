@@ -10,9 +10,10 @@ let package = Package(
         .library(name: "ClaudeCodeIRCCore", targets: ["ClaudeCodeIRCCore"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/jsflax/NCursesUI.git", branch: "main"),
+        .package(path: "../NCursesUI"),
         .package(url: "https://github.com/jsflax/lattice.git", branch: "main"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.0"),
     ],
     targets: [
         .executableTarget(
@@ -33,12 +34,16 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOWebSocket", package: "swift-nio"),
+                .product(name: "MCP", package: "swift-sdk"),
             ],
             swiftSettings: [.interoperabilityMode(.Cxx)]
         ),
         .testTarget(
             name: "ClaudeCodeIRCCoreTests",
-            dependencies: ["ClaudeCodeIRCCore"],
+            dependencies: [
+                "ClaudeCodeIRCCore",
+                .product(name: "MCP", package: "swift-sdk"),
+            ],
             swiftSettings: [.interoperabilityMode(.Cxx)]
         ),
     ]

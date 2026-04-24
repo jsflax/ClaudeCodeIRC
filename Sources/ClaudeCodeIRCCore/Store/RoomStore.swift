@@ -20,6 +20,7 @@ public enum RoomStore {
         AssistantChunk.self,
         ToolEvent.self,
         ApprovalRequest.self,
+        ApprovalPolicy.self,
         HostHandoff.self,
     ]
 

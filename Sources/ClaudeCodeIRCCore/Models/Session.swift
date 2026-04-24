@@ -10,6 +10,12 @@ public final class Session {
     public var permissionMode: PermissionMode = .acceptEdits
     public var createdAt: Date = Date()
 
+    /// UUID we pass to every `claude -p --session-id <uuid>` spawn so
+    /// claude persists conversation state across prompts — without
+    /// this, every `@claude` mention is a blank slate. Assigned by
+    /// `LobbyModel.host(...)` at room creation.
+    public var claudeSessionId: UUID = UUID()
+
     public var host: Member?
 
     @Relation(link: \Member.session)

@@ -1,4 +1,5 @@
 import ClaudeCodeIRCCore
+import Foundation
 import Lattice
 import NCursesUI
 
@@ -36,6 +37,27 @@ struct RootView: View {
 
 @main
 struct ClaudeCodeIRCApp: App {
+    /// Overrides NCursesUI's default `main()` to intercept the
+    /// `--mcp-approve` invocation before the TUI boots. When `claude`
+    /// spawns us as a stdio MCP server (per `ClaudeCliDriver`'s
+    /// `--mcp-config`), we don't want to touch ncurses at all — we're
+    /// just a JSON-RPC pipe over stdin/stdout routing approvals
+    /// through the host's room Lattice.
+    ///
+    /// `ApprovalMcpShim.run()` is `async -> Never` and calls `exit()`
+    /// at teardown, so the detached Task never returns control here;
+    /// `RunLoop.main.run()` just keeps the process alive while the
+    /// cooperative pool services the shim.
+    static func main() {
+        if CommandLine.arguments.contains("--mcp-approve") {
+            Task.detached { await ApprovalMcpShim.run() }
+            RunLoop.main.run()
+            return
+        }
+        let app = Self.init()
+        app.body.run()
+    }
+
     init() {
         Log.line("app", "startup — log file: \(Log.filePath)")
         // `@Query` Wrapper's init seeds its TableResults value from

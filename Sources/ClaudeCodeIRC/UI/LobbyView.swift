@@ -239,7 +239,7 @@ struct HostFormOverlay: View {
                 let room = try await model.host(
                     name: name.isEmpty ? "unnamed" : name,
                     cwd: model.prefs.lastCwd,
-                    mode: .acceptEdits,
+                    mode: .default,
                     requireJoinCode: requireCode)
                 onCreated(room)
             } catch {

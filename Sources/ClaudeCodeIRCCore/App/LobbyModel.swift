@@ -62,7 +62,7 @@ public final class LobbyModel {
         let joinCode: String? = requireJoinCode ? Self.generateCode() : nil
         Log.line("lobby", "host name=\(name) cwd=\(cwd) roomCode=\(roomCode) auth=\(requireJoinCode ? "required" : "open")")
         let lattice = try RoomStore.openHost(code: roomCode)
-        Log.line("lobby", "host lattice opened → \(lattice.configuration.fileURL.lastPathComponent)")
+        Log.line("lobby", "host lattice opened → \(lattice.configuration.fileURL.path)")
 
         let session = Session()
         session.code = roomCode
@@ -95,6 +95,12 @@ public final class LobbyModel {
         publisher.publish()
         Log.line("lobby", "bonjour publish name=\(name) port=\(port) nick=\(self.prefs.nick)")
 
+        let driver = try await ClaudeCLIDriver(
+            latticeRef: lattice.sendableReference,
+            sessionRef: session.sendableReference,
+            cwd: cwd)
+        Log.line("lobby", "claude driver constructed for cwd=\(cwd) mode=\(mode)")
+
         prefs.lastCwd = cwd
 
         return RoomModel.host(
@@ -103,7 +109,8 @@ public final class LobbyModel {
             selfMember: me,
             joinCode: joinCode,
             server: server,
-            publisher: publisher)
+            publisher: publisher,
+            driver: driver)
     }
 
     /// Join an existing room. `joinCode` is `nil` for open rooms; a

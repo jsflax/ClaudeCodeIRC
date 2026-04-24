@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Lattice
 
@@ -21,8 +22,13 @@ public final class RoomModel {
 
     public let server: RoomSyncServer?
     public let publisher: BonjourPublisher?
+    /// Host-only. The `claude` subprocess driver. Created eagerly on
+    /// `host(...)`; `send(prompt:)` forwards to it. Peers talk to
+    /// Claude via the host's Lattice rows — they have no local driver.
+    public let driver: (any ClaudeDriver)?
 
     private var catchUpTask: Task<Void, Never>?
+    private var mentionObserver: AnyCancellable?
 
     /// Host-side factory — Session + Member rows already inserted by caller.
     public static func host(
@@ -31,15 +37,19 @@ public final class RoomModel {
         selfMember: Member,
         joinCode: String?,
         server: RoomSyncServer,
-        publisher: BonjourPublisher
+        publisher: BonjourPublisher,
+        driver: (any ClaudeDriver)
     ) -> RoomModel {
-        RoomModel(
+        let model = RoomModel(
             lattice: lattice,
             session: session,
             selfMember: selfMember,
             joinCode: joinCode,
             server: server,
-            publisher: publisher)
+            publisher: publisher,
+            driver: driver)
+        model.startClaudeMentionObserver()
+        return model
     }
 
     /// Peer-side factory. Inserts the peer's own `Member` immediately
@@ -66,7 +76,8 @@ public final class RoomModel {
             selfMember: me,
             joinCode: joinCode,
             server: nil,
-            publisher: nil)
+            publisher: nil,
+            driver: nil)
         model.startPeerCatchUp(roomCode: roomCode)
         return model
     }
@@ -77,7 +88,8 @@ public final class RoomModel {
         selfMember: Member?,
         joinCode: String?,
         server: RoomSyncServer?,
-        publisher: BonjourPublisher?
+        publisher: BonjourPublisher?,
+        driver: (any ClaudeDriver)?
     ) {
         self.lattice = lattice
         self.session = session
@@ -85,6 +97,7 @@ public final class RoomModel {
         self.joinCode = joinCode
         self.server = server
         self.publisher = publisher
+        self.driver = driver
     }
 
     private func startPeerCatchUp(roomCode: String) {
@@ -122,7 +135,43 @@ public final class RoomModel {
 
     public func leave() async {
         catchUpTask?.cancel()
+        mentionObserver?.cancel()
+        if let driver { await driver.stop() }
         if let server { try? await server.stop() }
         publisher?.stop()
+    }
+
+    // MARK: - Host-side @claude trigger
+
+    /// Host-only. Observes the `ChatMessage` table directly — both
+    /// local writes and peer uploads land as `.insert` notifications
+    /// here. On a mention, forward the message as a single-turn prompt
+    /// to the `claude` subprocess. P5's TurnManager will replace this
+    /// with multi-message intra-turn assembly and inter-turn queueing;
+    /// for now the goal is a working end-to-end path.
+    private func startClaudeMentionObserver() {
+        guard driver != nil else { return }
+        Log.line("room-host", "@claude observer starting")
+        mentionObserver = lattice.observe(ChatMessage.self) { @Sendable [weak self] change in
+            guard case .insert(let rowId) = change else { return }
+            Task { [weak self] in
+                await self?.handleInsertedChatMessage(rowId: rowId)
+            }
+        }
+    }
+
+    private func handleInsertedChatMessage(rowId: Int64) async {
+        guard let msg = lattice.object(ChatMessage.self, primaryKey: rowId),
+              msg.kind == .user,
+              !msg.side,
+              ClaudeMention.matches(msg.text),
+              let driver
+        else { return }
+        let nick = msg.author?.nick ?? "?"
+        let prompt = "\(nick): \(msg.text)"
+        let ref = msg.sendableReference
+        Log.line("room-host", "@claude fire nick=\(nick) text=\(msg.text.prefix(80))")
+        do { try await driver.send(prompt: prompt, promptMessageRef: ref) }
+        catch { Log.line("room-host", "driver.send failed: \(error)") }
     }
 }

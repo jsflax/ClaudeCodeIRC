@@ -2,49 +2,66 @@ import Combine
 import Foundation
 import Lattice
 
-/// Room-screen state. Holds the room's Lattice handle and, on the
-/// host, the sync server + Bonjour publisher. On a peer, those are
-/// nil and the Lattice's own `WebsocketClient` handles sync.
+/// One joined room. Replaces the old `RoomModel` and widens it to live
+/// inside the new multi-room `RoomsModel` — the UI renders many
+/// `RoomInstance`s simultaneously (sessions sidebar shows all joined
+/// rooms, only one is active at a time).
+///
+/// Holds the room's `Lattice` handle and — on the host — the sync
+/// server + Bonjour publisher + Claude driver + TurnManager. On a
+/// peer, those are nil and the `Lattice`'s own sync client handles
+/// catch-up.
 ///
 /// `@MainActor` because the TUI reads from this during view body
-/// evaluation. Heavy work stays off main: `RoomSyncServer` is a
-/// background actor, Lattice's sync client runs on its own scheduler,
-/// Bonjour delegates to its own dispatch queue.
+/// evaluation. Heavy work stays off main (server is a background
+/// actor, sync client on its own scheduler, Bonjour on its own
+/// dispatch queue).
 @MainActor
 @Observable
-public final class RoomModel {
+public final class RoomInstance: Identifiable {
+    /// App-scoped identity — used by the sessions sidebar + Alt+1..9
+    /// to address a specific joined room. Not the sync code.
+    public let id: UUID = UUID()
+
     public let lattice: Lattice
+    public let roomCode: String
     /// `nil` for an open room; the bearer code otherwise. Host displays
-    /// it in the status bar so they can share it out-of-band.
+    /// it so they can share it out-of-band.
     public let joinCode: String?
+    public let isHost: Bool
+
     public private(set) var session: Session?
     public private(set) var selfMember: Member?
 
     public let server: RoomSyncServer?
     public let publisher: BonjourPublisher?
-    /// Host-only. The `claude` subprocess driver. Created eagerly on
-    /// `host(...)`; the TurnManager drives it. Peers talk to Claude
+    /// Host-only. The `claude` subprocess driver. Created eagerly at
+    /// host() time; the TurnManager drives it. Peers talk to Claude
     /// via the host's Lattice rows — they have no local driver.
     public let driver: (any ClaudeDriver)?
-    /// Host-only. Accumulates `ChatMessage` inserts, fires the driver
-    /// on `@claude` mentions with the surrounding room context, and
-    /// queues in-flight arrivals until the current Turn completes.
-    /// Protocol-typed so tests can substitute a fake without real
-    /// subprocess / Lattice plumbing.
+    /// Host-only. Accumulates ChatMessage inserts, fires the driver on
+    /// @claude mentions with the surrounding context, queues arrivals
+    /// until the current Turn completes. Protocol-typed so tests can
+    /// substitute a fake.
     public let turnManager: (any TurnManaging)?
-    /// Cross-launch preferences (nick, last cwd). Threaded from
-    /// `LobbyModel` so `/nick` inside the room persists for the next
-    /// session. Lives on a different Lattice file from the room
-    /// itself — writing `prefs.nick = name` commits to
-    /// `prefs.lattice`.
-    public let prefs: AppPreferences?
+
+    /// Prefs handle — shared across all RoomInstances. Threaded from
+    /// `RoomsModel` so `/nick` inside a room persists across launches.
+    public let prefs: AppPreferences
+
+    /// Last time the UI showed this room as active. The sessions
+    /// sidebar's unread badge is computed from ChatMessage rows newer
+    /// than this. Updated by WorkspaceView on activation.
+    public var lastSeenAt: Date = Date()
 
     private var catchUpTask: Task<Void, Never>?
     private var chatObserver: AnyCancellable?
 
-    /// Host-side factory — Session + Member rows already inserted by caller.
+    /// Host-side factory — Session + Member rows already inserted by
+    /// the caller. Starts the turn-manager chat observer.
     public static func host(
         lattice: Lattice,
+        roomCode: String,
         session: Session,
         selfMember: Member,
         joinCode: String?,
@@ -53,9 +70,11 @@ public final class RoomModel {
         driver: (any ClaudeDriver),
         turnManager: any TurnManaging,
         prefs: AppPreferences
-    ) -> RoomModel {
-        let model = RoomModel(
+    ) -> RoomInstance {
+        let instance = RoomInstance(
             lattice: lattice,
+            roomCode: roomCode,
+            isHost: true,
             session: session,
             selfMember: selfMember,
             joinCode: joinCode,
@@ -64,11 +83,11 @@ public final class RoomModel {
             driver: driver,
             turnManager: turnManager,
             prefs: prefs)
-        model.startChatObserver()
-        return model
+        instance.startChatObserver()
+        return instance
     }
 
-    /// Peer-side factory. Inserts the peer's own `Member` immediately
+    /// Peer-side factory. Inserts the peer's own Member immediately
     /// with an unset `session` link so the UI shows the correct nick
     /// right away; the Session arrives asynchronously via sync
     /// catch-up, at which point `startPeerCatchUp` backfills
@@ -77,18 +96,19 @@ public final class RoomModel {
         lattice: Lattice,
         roomCode: String,
         joinCode: String?,
-        nick: String,
         prefs: AppPreferences
-    ) -> RoomModel {
-        Log.line("room-peer", "creating peer nick=\(nick) roomCode=\(roomCode)")
+    ) -> RoomInstance {
+        Log.line("room-peer", "creating peer nick=\(prefs.nick) roomCode=\(roomCode)")
         let me = Member()
-        me.nick = nick
+        me.nick = prefs.nick
         me.isHost = false
         lattice.add(me)
         Log.line("room-peer", "inserted selfMember nick=\(me.nick)")
 
-        let model = RoomModel(
+        let instance = RoomInstance(
             lattice: lattice,
+            roomCode: roomCode,
+            isHost: false,
             session: nil,
             selfMember: me,
             joinCode: joinCode,
@@ -97,12 +117,14 @@ public final class RoomModel {
             driver: nil,
             turnManager: nil,
             prefs: prefs)
-        model.startPeerCatchUp(roomCode: roomCode)
-        return model
+        instance.startPeerCatchUp(roomCode: roomCode)
+        return instance
     }
 
     private init(
         lattice: Lattice,
+        roomCode: String,
+        isHost: Bool,
         session: Session?,
         selfMember: Member?,
         joinCode: String?,
@@ -110,9 +132,11 @@ public final class RoomModel {
         publisher: BonjourPublisher?,
         driver: (any ClaudeDriver)?,
         turnManager: (any TurnManaging)?,
-        prefs: AppPreferences?
+        prefs: AppPreferences
     ) {
         self.lattice = lattice
+        self.roomCode = roomCode
+        self.isHost = isHost
         self.session = session
         self.selfMember = selfMember
         self.joinCode = joinCode
@@ -126,8 +150,6 @@ public final class RoomModel {
     private func startPeerCatchUp(roomCode: String) {
         catchUpTask = Task { [weak self, lattice] in
             Log.line("room-peer", "catch-up task started, watching for Session code=\(roomCode)")
-            // Check once up front in case the Session already exists
-            // (reconnect to a room whose DB is on disk from a prior run).
             if let existing = lattice.objects(Session.self)
                 .first(where: { $0.code == roomCode }) {
                 Log.line("room-peer", "session already present → link immediately")
@@ -135,7 +157,6 @@ public final class RoomModel {
                 return
             }
             Log.line("room-peer", "tailing changeStream for Session arrival")
-            // Otherwise tail changeStream until it shows up.
             for await refs in lattice.changeStream {
                 if Task.isCancelled { return }
                 Log.line("room-peer", "changeStream yielded \(refs.count) refs")
@@ -167,14 +188,10 @@ public final class RoomModel {
     // MARK: - Host-side chat observer → TurnManager
 
     /// Host-only. Every `ChatMessage` insert (local write or peer
-    /// upload) forwards to `TurnManager.ingest`. The manager decides
+    /// upload) forwards to TurnManager.ingest. The manager decides
     /// whether to buffer, fire the driver, or queue for after the
-    /// current turn. Filtering — `.side`, `.system`, assistant-
-    /// authored messages — happens inside `TurnManager`.
-    ///
-    /// We forward `globalId` (a `UUID`) rather than the model ref
-    /// because the observer callback is `@Sendable`; the manager
-    /// re-resolves the row on its own isolation.
+    /// current turn. Filtering — .side, .system, assistant-authored
+    /// messages — happens inside TurnManager.
     private func startChatObserver() {
         guard turnManager != nil else { return }
         Log.line("room-host", "turn-manager chat observer starting")

@@ -3,35 +3,20 @@ import Foundation
 import Lattice
 import NCursesUI
 
-enum Screen {
-    case lobby(LobbyModel)
-    case room(RoomModel)
-}
-
 struct RootView: View {
     @Environment(\.screen) var screen
-    @State private var current: Screen = .lobby(LobbyModel())
+    @State private var model: RoomsModel = RoomsModel()
 
     var body: some View {
-        switch current {
-        case .lobby(let model):
-            LobbyView(model: model) { room in
-                current = .room(room)
-            }
-        case .room(let model):
-            // Env modifier must live OUTSIDE RoomView so that by the
-            // time RoomView's DynamicProperty update runs (which is
-            // where @Query reads @Environment(\.lattice)), the lattice
-            // has already been installed in _current. Applying the env
-            // inside RoomView's own body is too late.
-            RoomView(model: model) {
-                Task {
-                    await model.leave()
-                    current = .lobby(LobbyModel())
-                }
-            }
-            .environment(\.lattice, model.lattice)
-        }
+        // Env modifier must live OUTSIDE WorkspaceView so that by the
+        // time its DynamicProperty updates run (which is where @Query
+        // reads @Environment(\.lattice)), the active room's lattice is
+        // already installed. Applying env inside a view's own body is
+        // too late.
+        let activeLattice = model.activeRoom?.lattice ?? LatticeKey.defaultValue
+        return WorkspaceView(model: model)
+            .environment(\.lattice, activeLattice)
+            .environment(\.palette, model.prefs.paletteId.palette)
     }
 }
 
@@ -61,12 +46,11 @@ struct ClaudeCodeIRCApp: App {
     init() {
         Log.line("app", "startup — log file: \(Log.filePath)")
         // `@Query` Wrapper's init seeds its TableResults value from
-        // `LatticeKey.defaultValue.objects(T.self)` BEFORE the room
-        // lattice is installed via the environment. If that fallback
-        // lattice doesn't know about our model types, SQLite barfs
-        // with "no such table" on the first observe/fetch. Register
-        // the full schema on the default in-memory placeholder at
-        // process start.
+        // `LatticeKey.defaultValue.objects(T.self)` BEFORE the active
+        // room lattice is installed via the environment. If that
+        // fallback lattice doesn't know about our model types, SQLite
+        // barfs with "no such table" on the first observe/fetch.
+        // Register the full schema on the default in-memory placeholder.
         LatticeKey.defaultValue = try! Lattice(
             for: RoomStore.schema + [AppPreferences.self],
             configuration: .init(isStoredInMemoryOnly: true))

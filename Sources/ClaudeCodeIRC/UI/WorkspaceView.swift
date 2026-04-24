@@ -21,6 +21,9 @@ struct WorkspaceView: View {
     @State private var joinFormVisible: Bool = false
     @State private var pendingJoin: DiscoveredRoom?
     @State private var paletteSelectorVisible: Bool = false
+    /// Highlighted slash-popup row — driven by ↑/↓, used by Tab / Enter
+    /// to pick the selected command instead of always-the-first.
+    @State private var slashSelection: String = ""
 
     @Query(sort: \ApprovalRequest.requestedAt) var approvals: TableResults<ApprovalRequest>
 
@@ -33,12 +36,17 @@ struct WorkspaceView: View {
 
     // MARK: - Slash-popup state
 
-    /// Popup is visible whenever the draft looks like a partial slash
-    /// command — starts with `/` and the command portion hasn't yet
-    /// been terminated by a space (once the user types past the
-    /// command word, they're filling in arguments, not picking).
+    /// Popup is visible while the user is still picking a command —
+    /// draft starts with `/`, has no space yet, AND the portion
+    /// after the slash isn't an exact match for a known command.
+    /// Once the user has typed out a full command name (`/host`,
+    /// `/palette`, …) the popup hides so Enter can send the intent
+    /// instead of triggering completion.
     private var slashPopupVisible: Bool {
-        draft.hasPrefix("/") && !draft.contains(" ")
+        guard draft.hasPrefix("/"), !draft.contains(" ") else { return false }
+        let cmd = String(draft.dropFirst()).lowercased()
+        let isExactMatch = InputRouter.commands.contains { $0.name == cmd }
+        return !isExactMatch
     }
 
     /// Commands matching the current draft prefix. Empty when the
@@ -63,6 +71,21 @@ struct WorkspaceView: View {
         let separatorWidth = 1 * 2  // two vertical rules
         let centerWidth = max(10, cols - leftWidth - rightWidth - separatorWidth)
 
+        // Vertical budget — pin the HStack's height so the chrome
+        // (status, input, popup, hotkeys) always fits below. Without
+        // this the HStack takes its natural (tall) measure and pushes
+        // the popup + hotkey strip off-screen.
+        let popupRows = slashPopupVisible
+            ? (slashCompletions.count + 1)  // header + one per row
+            : 0
+        let chromeRows = 1 /* topbar */
+            + 1 /* hline */
+            + 1 /* status */
+            + 1 /* input */
+            + popupRows
+            + 1 /* hotkey strip */
+        let hstackHeight = max(5, Term.rows - chromeRows)
+
         return VStack(spacing: 0) {
             TopBar(model: model)
             HStack(spacing: 0) {
@@ -75,13 +98,20 @@ struct WorkspaceView: View {
                 } else {
                     EmptyView().frame(width: rightWidth)
                 }
-            }
+            }.frame(height: hstackHeight)
             HLineView()
             statusLine
-            if slashPopupVisible {
-                SlashPopup(completions: slashCompletions)
-            }
             inputLine
+            // Slash popup renders BELOW the input line so the input's
+            // VStack position stays stable when the popup appears /
+            // disappears. Otherwise NCursesUI's position-based node
+            // pairing remounts TextField and its @State cursor resets
+            // to 0 on every `/` keystroke.
+            if slashPopupVisible {
+                SlashPopup(
+                    completions: slashCompletions,
+                    selection: $slashSelection)
+            }
             HotkeyStrip()
         }
         .onKeyPress(27 /* ESC */) {
@@ -181,12 +211,23 @@ struct WorkspaceView: View {
         let activeName = model.activeRoom?.session?.name
             ?? model.activeRoom?.roomCode
             ?? "lobby"
+        // ↑/↓ attached HERE (not on the root workspace) so they sit
+        // later in dispatch order than the ScrollView that contains
+        // the message list — NCursesUI walks children in reverse for
+        // key dispatch, and ScrollView otherwise eats arrow keys for
+        // scroll-offset adjustments before they reach us.
         return HStack {
             Text("[\(activeName)] > ").foregroundColor(.yellow)
             TextField("type a message · @claude to invoke · / for commands · Tab to complete",
                       text: $draft,
                       isFocused: inputFocusBinding,
                       onSubmit: send)
+        }
+        .onKeyPress(Int32(KEY_UP)) {
+            if slashPopupVisible { moveSlashSelection(-1) }
+        }
+        .onKeyPress(Int32(KEY_DOWN)) {
+            if slashPopupVisible { moveSlashSelection(+1) }
         }
     }
 
@@ -231,11 +272,24 @@ struct WorkspaceView: View {
     }
 
     private func completeSlash() {
-        guard let match = slashCompletions.first else { return }
-        // Replace the whole draft with the matched command's slug so
-        // subsequent keystrokes fill in arguments. The trailing space
-        // makes typing "claude" or a path immediately useful.
-        draft = "/\(match.name) "
+        // Prefer the highlighted row; fall back to the first match if
+        // the user hasn't touched arrows yet (or the selection scrolled
+        // off-list because completions changed).
+        let picked = slashCompletions.first { $0.name == slashSelection }
+            ?? slashCompletions.first
+        guard let picked else { return }
+        draft = "/\(picked.name) "
+    }
+
+    /// Shift the slash-popup selection by `delta` rows (typically ±1).
+    /// Wraps at the boundaries so ↑ on the first row lands on the last
+    /// and vice-versa; feels better in a short popup than clamping.
+    private func moveSlashSelection(_ delta: Int) {
+        let items = slashCompletions
+        guard !items.isEmpty else { return }
+        let currentIdx = items.firstIndex { $0.name == slashSelection } ?? 0
+        let nextIdx = ((currentIdx + delta) % items.count + items.count) % items.count
+        slashSelection = items[nextIdx].name
     }
 
     private func completeNick() {
@@ -266,6 +320,13 @@ struct WorkspaceView: View {
     // MARK: - Send / approve
 
     private func send() {
+        // Slash popup intercepts Enter — treat it as "pick highlighted
+        // command" instead of sending raw. The user still has to press
+        // Enter again with real args typed to actually fire the intent.
+        if slashPopupVisible {
+            completeSlash()
+            return
+        }
         let raw = draft
         draft = ""
         let intent = InputRouter.parse(raw)
@@ -501,20 +562,26 @@ struct WorkspaceView: View {
 /// `WorkspaceView.completeSlash`).
 struct SlashPopup: View {
     let completions: [InputRouter.Command]
+    @Binding var selection: String
 
     var body: some View {
         VStack(spacing: 0) {
-            Text("── slash commands ─────────")
+            Text("── slash commands (↑/↓ navigate · Tab/Enter pick) ──")
                 .foregroundColor(.dim)
             if completions.isEmpty {
-                Text("  (no matches — Esc or Backspace to dismiss)")
+                Text("  (no matches — Backspace to dismiss)")
                     .foregroundColor(.dim)
             } else {
-                // Highlight the first match — that's what Tab picks.
+                // Fall back to the first match when `selection` doesn't
+                // name any currently-visible row — happens on first
+                // mount (selection: "") and whenever the completion
+                // set narrows past the previous pick.
+                let active = completions.first(where: { $0.name == selection })
+                    ?? completions.first
                 ForEach(completions) { cmd in
                     SlashPopupRow(
                         command: cmd,
-                        highlighted: cmd == completions.first)
+                        highlighted: cmd.name == active?.name)
                 }
             }
         }

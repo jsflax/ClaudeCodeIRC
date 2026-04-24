@@ -181,4 +181,23 @@ import ClaudeCodeIRCCore
         // Args ignored — the overlay drives the pick.
         #expect(InputRouter.parse("/palette claude") == .palette)
     }
+
+    // MARK: - /host /join
+
+    @Test func hostIsParsed() {
+        #expect(InputRouter.parse("/host") == .host)
+        #expect(InputRouter.parse("/HOST") == .host)
+    }
+
+    @Test func bareJoinHasNilFilter() {
+        #expect(InputRouter.parse("/join") == .join(nil))
+    }
+
+    @Test func joinWithNameFilter() {
+        #expect(InputRouter.parse("/join alpha") == .join("alpha"))
+    }
+
+    @Test func joinCaseInsensitive() {
+        #expect(InputRouter.parse("/JOIN beta") == .join("beta"))
+    }
 }

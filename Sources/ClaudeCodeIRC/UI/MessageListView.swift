@@ -16,10 +16,19 @@ struct MessageListView: View {
     /// timestamps at or before this are hidden in this client; rows
     /// stay in the lattice so sync is unaffected.
     let scrollbackFloor: Date?
+    /// The local member, threaded down so `AskQuestionCardView` can
+    /// render the user's own ballot checkboxes.
+    let selfMember: Member?
+    /// Active question card focus state. WorkspaceView owns the
+    /// state and decides which card (if any) is the focus target.
+    let activeAskQuestionId: UUID?
+    let askFocusedRow: Int
+    let askPendingBallot: Set<String>
 
     @Query(sort: \ChatMessage.createdAt) var messages: TableResults<ChatMessage>
     @Query(sort: \AssistantChunk.createdAt) var chunks: TableResults<AssistantChunk>
     @Query(sort: \ApprovalRequest.requestedAt) var approvals: TableResults<ApprovalRequest>
+    @Query(sort: \AskQuestion.requestedAt) var askQuestions: TableResults<AskQuestion>
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +38,13 @@ struct MessageListView: View {
                     MessageRow(event: event)
                 case .approval(let req):
                     ApprovalCardView(request: req, isHost: isHost)
+                case .askQuestion(let q):
+                    AskQuestionCardView(
+                        question: q,
+                        focusedRow: askFocusedRow,
+                        pendingBallot: askPendingBallot,
+                        isFocused: q.globalId == activeAskQuestionId,
+                        selfMember: selfMember)
                 }
             }
         }
@@ -38,10 +54,35 @@ struct MessageListView: View {
         let chatEvents = messages.map { RoomEvent.message($0) }
         let chunkEvents = chunks.map { RoomEvent.chunk($0) }
         let approvalEvents = approvals.map { RoomEvent.approval($0) }
-        let merged = (chatEvents + chunkEvents + approvalEvents)
+        let askEvents = visibleAskQuestions().map { RoomEvent.askQuestion($0) }
+        let merged = (chatEvents + chunkEvents + approvalEvents + askEvents)
             .sorted { $0.timestamp < $1.timestamp }
         guard let floor = scrollbackFloor else { return merged }
         return merged.filter { $0.timestamp > floor }
+    }
+
+    /// Sequential multi-question groups: only surface the first
+    /// `.pending` member of each group, plus all already-resolved
+    /// rows. Future-question rows for a group with an in-flight
+    /// earlier question stay hidden so the room works on one
+    /// question at a time.
+    private func visibleAskQuestions() -> [AskQuestion] {
+        var firstPendingByTool: [String: Int] = [:]
+        for q in askQuestions where q.status == .pending {
+            let prior = firstPendingByTool[q.toolUseId] ?? Int.max
+            if q.groupIndex < prior {
+                firstPendingByTool[q.toolUseId] = q.groupIndex
+            }
+        }
+        return askQuestions.filter { q in
+            switch q.status {
+            case .answered, .cancelled:
+                return true
+            case .pending:
+                let firstPending = firstPendingByTool[q.toolUseId] ?? q.groupIndex
+                return q.groupIndex == firstPending
+            }
+        }
     }
 }
 
@@ -50,20 +91,23 @@ enum RoomEvent: Identifiable {
     case message(ChatMessage)
     case chunk(AssistantChunk)
     case approval(ApprovalRequest)
+    case askQuestion(AskQuestion)
 
     var id: String {
         switch self {
-        case .message(let m):  return "m-\(m.globalId?.uuidString ?? "?")"
-        case .chunk(let c):    return "c-\(c.globalId?.uuidString ?? "?")"
-        case .approval(let a): return "a-\(a.globalId?.uuidString ?? "?")"
+        case .message(let m):     return "m-\(m.globalId?.uuidString ?? "?")"
+        case .chunk(let c):       return "c-\(c.globalId?.uuidString ?? "?")"
+        case .approval(let a):    return "a-\(a.globalId?.uuidString ?? "?")"
+        case .askQuestion(let q): return "q-\(q.globalId?.uuidString ?? "?")"
         }
     }
 
     var timestamp: Date {
         switch self {
-        case .message(let m):  return m.createdAt
-        case .chunk(let c):    return c.createdAt
-        case .approval(let a): return a.requestedAt
+        case .message(let m):     return m.createdAt
+        case .chunk(let c):       return c.createdAt
+        case .approval(let a):    return a.requestedAt
+        case .askQuestion(let q): return q.requestedAt
         }
     }
 }
@@ -86,6 +130,10 @@ struct MessageRow: View {
             // the slot isn't empty if the parent ever forgets to
             // branch on .approval.
             Text("[approval card]").foregroundColor(.dim)
+        case .askQuestion:
+            // Same fallback rationale as .approval — AskQuestion rows
+            // are routed to AskQuestionCardView in the parent.
+            Text("[question card]").foregroundColor(.dim)
         }
     }
 

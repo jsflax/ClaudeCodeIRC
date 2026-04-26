@@ -26,6 +26,52 @@ struct WorkspaceView: View {
     @State private var slashSelection: String = ""
 
     @Query(sort: \ApprovalRequest.requestedAt) var approvals: TableResults<ApprovalRequest>
+    @Query(sort: \AskQuestion.requestedAt) var askQuestions: TableResults<AskQuestion>
+
+    // MARK: - AskUserQuestion focus state
+    //
+    // Lives on WorkspaceView (rather than per-card) so the focus row
+    // and the multi-select pending ballot survive the lattice-change
+    // re-renders that recreate AskQuestionCardView on every vote.
+    // Keyed off `pendingAskQuestion?.globalId`; resets to (0, []) when
+    // a new question becomes active.
+
+    /// Currently-focused row index inside the active AskQuestion's
+    /// option list (0..<options.count for option rows, == options.count
+    /// for "Other…").
+    @State private var askFocusedRow: Int = 0
+
+    /// Multi-select local pending ballot — toggled by Enter, committed
+    /// to a `AskVote` row by Tab. Empty for single-select questions.
+    @State private var askPendingBallot: Set<String> = []
+
+    /// Tracks the question whose state above corresponds to. When a
+    /// new question becomes active (k+1 in a sequential group, or a
+    /// fresh AskUserQuestion arrives), we clear the focus state.
+    @State private var askActiveQuestionId: UUID? = nil
+
+    /// "Other…" overlay visibility. Mounted when the active question
+    /// has its Other row focused and the user hits Enter.
+    @State private var askOtherVisible: Bool = false
+
+    /// Oldest `.pending` AskQuestion that should be the active focus
+    /// target. Mirrors `pendingApproval`: drives both visibility of
+    /// the focus marker and the input-handler routing in WorkspaceView.
+    private var pendingAskQuestion: AskQuestion? {
+        // Find the lowest groupIndex pending row across all groups —
+        // sequential rule prevents two cards being interactive at
+        // once. If multiple groups are stacked (unlikely under -p
+        // serialisation), the earliest by requestedAt wins.
+        let pending = askQuestions.filter { $0.status == .pending }
+        return pending
+            .sorted { lhs, rhs in
+                if lhs.requestedAt != rhs.requestedAt {
+                    return lhs.requestedAt < rhs.requestedAt
+                }
+                return lhs.groupIndex < rhs.groupIndex
+            }
+            .first
+    }
 
     /// Oldest `.pending` approval — Y/A/D on the host flips its status.
     /// Pending approvals also render as inline cards in the scrollback
@@ -173,13 +219,33 @@ struct WorkspaceView: View {
                 prefs: model.prefs,
                 isPresented: $paletteSelectorVisible)
         }
+        .overlay(isPresented: $askOtherVisible, dimsBackground: true) {
+            AskOtherInputOverlay(
+                isPresented: $askOtherVisible,
+                onSubmit: askSubmitOther)
+        }
+        // Reset focus state when the active question changes — a new
+        // question starts at row 0 with an empty pending ballot.
+        // `task(id:)` re-fires whenever pendingAskQuestion's globalId
+        // changes (or first-becomes-non-nil).
+        .task(id: pendingAskQuestion?.globalId) {
+            askFocusedRow = 0
+            askPendingBallot = []
+            askActiveQuestionId = pendingAskQuestion?.globalId
+        }
     }
 
     // MARK: - Center pane
 
     @ViewBuilder private var centerPane: some View {
         if let room = model.activeRoom {
-            RoomPane(room: room, draft: $draft, onSubmit: send)
+            RoomPane(
+                room: room,
+                draft: $draft,
+                onSubmit: send,
+                activeAskQuestionId: pendingAskQuestion?.globalId,
+                askFocusedRow: askFocusedRow,
+                askPendingBallot: askPendingBallot)
         } else {
             WelcomePane()
         }
@@ -226,24 +292,60 @@ struct WorkspaceView: View {
                       onSubmit: send)
         }
         .onKeyPress(Int32(KEY_UP)) {
-            if slashPopupVisible { moveSlashSelection(-1) }
+            if slashPopupVisible { moveSlashSelection(-1); return }
+            if askCardActive { askMove(-1) }
         }
         .onKeyPress(Int32(KEY_DOWN)) {
-            if slashPopupVisible { moveSlashSelection(+1) }
+            if slashPopupVisible { moveSlashSelection(+1); return }
+            if askCardActive { askMove(+1) }
+        }
+        // Enter — when the AskQuestion card is the focus and TextField
+        // is defocused, vote (single-select) or toggle (multi-select).
+        // Otherwise TextField's onSubmit handles it.
+        .onKeyPress(Int32(UInt8(ascii: "\n"))) {
+            guard askCardActive else { return }
+            askActivateFocusedRow()
+        }
+        // Tab — multi-select commit. Only fires when the card is the
+        // active focus; `handleTab()` (slash/nick complete) takes
+        // priority elsewhere via the dispatch order.
+        .onKeyPress(9 /* Tab */) {
+            if askCardActive, let q = pendingAskQuestion, q.multiSelect {
+                askCommitBallot()
+            }
         }
     }
 
+    /// True when an AskQuestion card should receive arrow/Enter/Tab
+    /// keypresses — same rule as the focus binding's "card route"
+    /// branch (pending question + empty draft + no overlay open).
+    private var askCardActive: Bool {
+        guard !hostFormVisible, !joinFormVisible, !askOtherVisible else {
+            return false
+        }
+        guard pendingAskQuestion != nil, draft.isEmpty else { return false }
+        return true
+    }
+
     private var inputFocusBinding: Binding<Bool> {
-        // Defocus the TextField so Y/A/D/ESC bubble past it when:
+        // Defocus the TextField so Y/A/D/ESC + arrow keys bubble past
+        // it when:
         //   (a) a form overlay is visible — it owns key handling
         //   (b) an approval is pending AND the draft is empty —
         //       the user isn't mid-typing, so their keystrokes are
         //       votes. Once they start typing (draft non-empty),
         //       TextField reclaims keys so they can finish the word.
+        //   (c) an AskQuestion is pending AND the draft is empty —
+        //       same rationale, but for arrow/Enter/Tab navigation
+        //       through the option list.
+        //   (d) the AskOtherInputOverlay is visible — it owns its
+        //       own TextField focus.
         Binding(
             get: {
                 if hostFormVisible || joinFormVisible { return false }
+                if askOtherVisible { return false }
                 if pendingApproval != nil && draft.isEmpty { return false }
+                if pendingAskQuestion != nil && draft.isEmpty { return false }
                 return true
             },
             set: { _ in })
@@ -553,6 +655,138 @@ struct WorkspaceView: View {
         req.decidedBy = room.selfMember
         Log.line("workspace", "always-allow for tool \(req.toolName)")
     }
+
+    // MARK: - AskQuestion focus / voting
+
+    /// Move the focus cursor up (-1) or down (+1) through the active
+    /// question's option list. Wraps at both ends so the user doesn't
+    /// fall off; clamping was tried earlier and felt sticky.
+    private func askMove(_ delta: Int) {
+        guard let q = pendingAskQuestion else { return }
+        let total = q.options.count + 1 // +1 for "Other…"
+        guard total > 0 else { return }
+        var next = (askFocusedRow + delta) % total
+        if next < 0 { next += total }
+        askFocusedRow = next
+    }
+
+    /// Enter on the focused row. For option rows: vote (single-select)
+    /// or toggle pending ballot (multi-select). For the "Other…" row:
+    /// open the free-text overlay.
+    private func askActivateFocusedRow() {
+        guard let q = pendingAskQuestion else { return }
+        let otherIdx = q.options.count
+        if askFocusedRow == otherIdx {
+            askOtherVisible = true
+            return
+        }
+        guard askFocusedRow >= 0, askFocusedRow < q.options.count else { return }
+        let label = q.options[askFocusedRow].label
+        if q.multiSelect {
+            // Toggle in local pending ballot — committed on Tab.
+            if askPendingBallot.contains(label) {
+                askPendingBallot.remove(label)
+            } else {
+                askPendingBallot.insert(label)
+            }
+        } else {
+            // Single-select: write directly. Re-pressing on the
+            // already-voted-for label retracts the vote (delete the
+            // existing AskVote row).
+            castSingleSelect(label: label, on: q)
+        }
+    }
+
+    /// Multi-select Tab — write the local pending ballot to lattice.
+    /// Replaces any prior ballot from this voter on this question.
+    private func askCommitBallot() {
+        guard let q = pendingAskQuestion, q.multiSelect else { return }
+        writeBallot(labels: Array(askPendingBallot), on: q)
+    }
+
+    /// Single-select vote: `[label]` ballot, or retract if the user
+    /// re-presses on a row they're already voted for.
+    private func castSingleSelect(label: String, on q: AskQuestion) {
+        guard let room = model.activeRoom, let voter = room.selfMember else { return }
+        // Find existing ballot from this voter.
+        let existing = q.votes.first { $0.voter?.globalId == voter.globalId }
+        if let existing, existing.chosenLabels == [label] {
+            // Re-press on already-voted row → retract.
+            room.lattice.delete(existing)
+            return
+        }
+        writeBallot(labels: [label], on: q)
+    }
+
+    /// Upsert an `AskVote` row for the active member on `q` with
+    /// `chosenLabels`. Wraps the delete + insert in a transaction so
+    /// peers see the new ballot atomically.
+    private func writeBallot(labels: [String], on q: AskQuestion) {
+        guard let room = model.activeRoom, let voter = room.selfMember else { return }
+        let lattice = room.lattice
+        lattice.beginTransaction()
+        for existing in q.votes where existing.voter?.globalId == voter.globalId {
+            lattice.delete(existing)
+        }
+        let vote = AskVote()
+        vote.voter = voter
+        vote.question = q
+        vote.chosenLabels = labels
+        vote.castAt = Date()
+        lattice.add(vote)
+        lattice.commitTransaction()
+        Log.line("workspace", "ballot cast labels=\(labels) on \"\(q.header)\"")
+    }
+
+    /// "Other…" submit — append a new option (de-duped) and auto-vote.
+    /// The append + ballot land in one transaction so peers can't see
+    /// the option without the submitter's vote already on it.
+    private func askSubmitOther(_ text: String) {
+        guard let q = pendingAskQuestion,
+              let room = model.activeRoom,
+              let voter = room.selfMember else { return }
+        let lattice = room.lattice
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        // De-dupe case-insensitively against existing labels.
+        let existingLabels = q.options.map { $0.label }
+        let matched = existingLabels.first { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+        let label = matched ?? trimmed
+
+        lattice.beginTransaction()
+        if matched == nil {
+            // Append a new option carrying the submitter's nick.
+            var opts = q.options
+            opts.append(AskOption(
+                label: trimmed,
+                optionDescription: "",
+                submittedByNick: voter.nick))
+            q.options = opts
+        }
+        // Auto-vote: drop any prior ballot from this voter, write a
+        // fresh one for the (possibly newly-added) label.
+        for existing in q.votes where existing.voter?.globalId == voter.globalId {
+            lattice.delete(existing)
+        }
+        // Multi-select: merge with the local pending ballot too so
+        // the new label sticks across Tab commits.
+        let labels: [String]
+        if q.multiSelect {
+            askPendingBallot.insert(label)
+            labels = Array(askPendingBallot)
+        } else {
+            labels = [label]
+        }
+        let vote = AskVote()
+        vote.voter = voter
+        vote.question = q
+        vote.chosenLabels = labels
+        vote.castAt = Date()
+        lattice.add(vote)
+        lattice.commitTransaction()
+        Log.line("workspace", "submitted other answer=\"\(trimmed)\" on \"\(q.header)\"")
+    }
 }
 
 // MARK: - Slash popup
@@ -634,6 +868,12 @@ struct RoomPane: View {
     let room: RoomInstance
     @Binding var draft: String
     let onSubmit: () -> Void
+    /// AskQuestion focus state, threaded down from `WorkspaceView`
+    /// so MessageListView's card render path knows which row to mark
+    /// with `▸` and which labels to render `[x]` for.
+    let activeAskQuestionId: UUID?
+    let askFocusedRow: Int
+    let askPendingBallot: Set<String>
 
     @Query(sort: \Turn.startedAt) var turns: TableResults<Turn>
 
@@ -657,7 +897,11 @@ struct RoomPane: View {
             ScrollView(height: scrollHeight) {
                 MessageListView(
                     isHost: room.isHost,
-                    scrollbackFloor: room.scrollbackFloor)
+                    scrollbackFloor: room.scrollbackFloor,
+                    selfMember: room.selfMember,
+                    activeAskQuestionId: activeAskQuestionId,
+                    askFocusedRow: askFocusedRow,
+                    askPendingBallot: askPendingBallot)
             }
             if let t = streamingTurn {
                 ClaudeThinkingView(turnId: t.globalId)

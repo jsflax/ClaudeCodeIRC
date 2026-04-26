@@ -194,10 +194,39 @@ public actor ClaudeCLIDriver: ClaudeDriver {
         p.waitUntilExit()
         Log.line("claude-cli", "subprocess exited status=\(p.terminationStatus)")
 
+        // Subprocess exit → any AskQuestion the MCP shim wrote (in
+        // its own subprocess, same SQLite file) is now orphaned: the
+        // shim is dead so even if quorum lands, nobody's tailing for
+        // it. Flip pending rows to `.cancelled` with a clear reason
+        // so the UI clears the card and clients see a definite
+        // outcome. Idempotent — re-flipping an already-cancelled row
+        // is a no-op via the status guard.
+        cancelOrphanedAskQuestions()
+
         process = nil
         stdinPipe = nil
         readerTask = nil
         stderrTask = nil
+    }
+
+    /// Walk every `.pending` AskQuestion in the driver's lattice and
+    /// flip them to `.cancelled`. There's effectively one driver per
+    /// lattice file (one room → one host claude subprocess), so the
+    /// scan-without-session-scope is safe; if multi-session-per-room
+    /// ever lands, add a `session` filter here.
+    private func cancelOrphanedAskQuestions() {
+        let lattice = processor.lattice
+        let pending = Array(lattice.objects(AskQuestion.self)
+            .where { $0.status == .pending })
+        guard !pending.isEmpty else { return }
+        lattice.transaction {
+            for q in pending where q.status == .pending {
+                q.status = .cancelled
+                q.cancelReason = "claude subprocess exited"
+                q.answeredAt = Date()
+            }
+        }
+        Log.line("claude-cli", "cancelled \(pending.count) orphaned AskQuestion rows")
     }
 
     // MARK: - Claude discovery + MCP config

@@ -52,6 +52,9 @@ public final class RoomInstance: Identifiable {
     /// seeing quorum locally get the status flip immediately instead
     /// of waiting for the host's sync round-trip.
     private let voteCoordinator: ApprovalVoteCoordinator
+    /// Sibling of `voteCoordinator` for `AskQuestion` rows. Same
+    /// run-everywhere, idempotent-writes story; different tally rule.
+    private let askCoordinator: AskVoteCoordinator
 
     /// Prefs handle — shared across all RoomInstances. Threaded from
     /// `RoomsModel` so `/nick` inside a room persists across launches.
@@ -162,6 +165,7 @@ public final class RoomInstance: Identifiable {
         // Every room instance runs a coordinator — tally is
         // deterministic and writes are idempotent.
         self.voteCoordinator = ApprovalVoteCoordinator(lattice: lattice)
+        self.askCoordinator = AskVoteCoordinator(lattice: lattice)
         self.prefs = prefs
     }
 

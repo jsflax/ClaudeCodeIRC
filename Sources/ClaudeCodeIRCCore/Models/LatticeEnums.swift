@@ -38,6 +38,11 @@ public enum ApprovalStatus: String, Codable, Sendable {
 }
 
 @LatticeEnum
+public enum AskStatus: String, Codable, Sendable {
+    case pending, answered, cancelled
+}
+
+@LatticeEnum
 public enum PermissionMode: String, Codable, Sendable {
     case `default`, acceptEdits, plan, auto, bypassPermissions
 

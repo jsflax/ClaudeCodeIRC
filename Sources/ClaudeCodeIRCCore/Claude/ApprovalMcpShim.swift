@@ -134,6 +134,15 @@ public enum ApprovalMcpShim {
         // straight through for both policy-hit and human-decided paths.
         let originalInput = args["input"] ?? .object([:])
 
+        // AskUserQuestion is semantically an answer prompt, not a
+        // permission prompt — short-circuit BEFORE policy / Approval
+        // creation so the room votes on labels instead of yes/no.
+        // Branching here keeps the rest of the handler intact for
+        // every other tool.
+        if toolName == "AskUserQuestion" {
+            return await handleAskQuestion(input: originalInput, lattice: lattice)
+        }
+
         // Short-circuit on a sticky policy — "always allow Bash" set
         // by a previous [A] press means every subsequent Bash call in
         // this room bypasses the overlay entirely.
@@ -149,6 +158,15 @@ public enum ApprovalMcpShim {
 
         Log.line("mcp-shim", "approve request: \(summary)")
 
+        // Hard invariant: AskUserQuestion must NEVER produce an
+        // ApprovalRequest row — it's an answer prompt, not a
+        // permission prompt. The early-return above already covers
+        // this; the assertion catches future refactors that move
+        // the branch point or introduce new code paths reaching
+        // here. Ships as a no-op in release builds.
+        assert(toolName != "AskUserQuestion",
+               "AskUserQuestion must be handled by handleAskQuestion, not as an Approval")
+
         let req = ApprovalRequest()
         req.toolName = toolName
         req.toolInput = inputStr
@@ -159,6 +177,159 @@ public enum ApprovalMcpShim {
         let decision = await awaitDecision(req: req, lattice: lattice, originalInput: originalInput)
         Log.line("mcp-shim", "approve decision: \(decision.behavior.rawValue)")
         return decision
+    }
+
+    // MARK: - AskUserQuestion handler
+
+    /// Intercepts `AskUserQuestion` tool calls and converts them into
+    /// democratic question rows. Returns a `deny`-with-message
+    /// `Decision` that hands claude the room's chosen answer(s) as
+    /// the tool's "error" payload. The built-in `AskUserQuestion`
+    /// is never invoked.
+    private static func handleAskQuestion(input: Value, lattice: Lattice) async -> Decision {
+        // Claude's input shape (see SDK):
+        //   { questions: [{ question, header, options: [{label, description}], multiSelect }] }
+        guard case .object(let inputDict) = input,
+              case .array(let questions)? = inputDict["questions"],
+              !questions.isEmpty
+        else {
+            Log.line("ask-shim", "malformed input — no questions array")
+            return .init(behavior: .deny, updatedInput: nil,
+                         message: "AskUserQuestion received malformed input.")
+        }
+
+        // Cap at 4 (claude's schema max) defensively. Group is
+        // surfaced sequentially in the UI; share one toolUseId so
+        // the tail loop below knows which rows to wait on.
+        let toolUseId = UUID().uuidString
+        let groupSize = min(questions.count, 4)
+
+        // Parse outside the transaction; the tx only batches the
+        // row inserts so the group lands atomically (peers either
+        // see the full set of questions or none of them, never a
+        // half-rendered group).
+        struct Parsed { let header: String; let options: [AskOption]; let multiSelect: Bool }
+        let parsed: [Parsed] = questions.prefix(groupSize).compactMap { qVal -> Parsed? in
+            guard case .object(let q) = qVal else { return nil }
+            let header: String = {
+                if case .string(let s)? = q["question"] { return s }
+                if case .string(let s)? = q["header"]   { return s }
+                return "(question)"
+            }()
+            let multiSelect: Bool = {
+                if case .bool(let b)? = q["multiSelect"] { return b }
+                return false
+            }()
+            let options: [AskOption] = {
+                guard case .array(let opts)? = q["options"] else { return [] }
+                return opts.compactMap { entry -> AskOption? in
+                    guard case .object(let o) = entry else { return nil }
+                    let label: String = {
+                        if case .string(let s)? = o["label"] { return s }
+                        return ""
+                    }()
+                    guard !label.isEmpty else { return nil }
+                    let desc: String = {
+                        if case .string(let s)? = o["description"] { return s }
+                        return ""
+                    }()
+                    return AskOption(label: label, optionDescription: desc)
+                }
+            }()
+            return Parsed(header: header, options: options, multiSelect: multiSelect)
+        }
+
+        var rowRefs: [ModelThreadSafeReference<AskQuestion>] = []
+        lattice.transaction {
+            for (idx, p) in parsed.enumerated() {
+                let row = AskQuestion()
+                row.header = p.header
+                row.options = p.options
+                row.multiSelect = p.multiSelect
+                row.status = .pending
+                row.toolUseId = toolUseId
+                row.groupIndex = idx
+                row.groupSize = parsed.count
+                row.requestedAt = Date()
+                lattice.add(row)
+                rowRefs.append(row.sendableReference)
+                Log.line("ask-shim",
+                    "queued question idx=\(idx)/\(parsed.count) header=\(p.header) " +
+                    "options=\(p.options.count) multi=\(p.multiSelect)")
+            }
+        }
+
+        guard !rowRefs.isEmpty else {
+            return .init(behavior: .deny, updatedInput: nil,
+                         message: "AskUserQuestion received no usable questions.")
+        }
+
+        // Tail until every row in the group is non-pending. Fast-path
+        // check first in case the coordinator already finished (e.g.
+        // single-pane quorum-1 trivial answer).
+        await awaitGroupCompletion(rowRefs: rowRefs, lattice: lattice)
+
+        // Resolve final state and build reply.
+        let finals: [AskQuestion] = rowRefs.compactMap { $0.resolve(on: lattice) }
+        if let cancelled = finals.first(where: { $0.status == .cancelled }) {
+            let reason = cancelled.cancelReason.isEmpty ? "cancelled" : cancelled.cancelReason
+            return .init(behavior: .deny, updatedInput: nil,
+                         message: "User declined to answer: \(reason)")
+        }
+
+        let message = formatGroupReply(finals)
+        Log.line("ask-shim", "group answered (\(finals.count) questions)")
+        return .init(behavior: .deny, updatedInput: nil, message: message)
+    }
+
+    private static func awaitGroupCompletion(
+        rowRefs: [ModelThreadSafeReference<AskQuestion>],
+        lattice: Lattice
+    ) async {
+        if allDone(rowRefs: rowRefs, lattice: lattice) { return }
+        for await _ in lattice.changeStream {
+            if allDone(rowRefs: rowRefs, lattice: lattice) { return }
+        }
+    }
+
+    private static func allDone(
+        rowRefs: [ModelThreadSafeReference<AskQuestion>],
+        lattice: Lattice
+    ) -> Bool {
+        for ref in rowRefs {
+            guard let row = ref.resolve(on: lattice) else { return false }
+            if row.status == .pending { return false }
+        }
+        return true
+    }
+
+    /// Build the `User responded: …` string that claude's model sees
+    /// as the AskUserQuestion tool's deny-message. Plan shape:
+    ///   - 1 question, single-select: `"User responded: <label>"`
+    ///   - 1 question, multi-select : `"User responded: ["a","b"]"`
+    ///                                or `(no options selected)` for empty
+    ///   - n questions: numbered list, one per question.
+    private static func formatGroupReply(_ qs: [AskQuestion]) -> String {
+        let sorted = qs.sorted { $0.groupIndex < $1.groupIndex }
+
+        func answerSegment(_ q: AskQuestion) -> String {
+            if q.multiSelect {
+                guard !q.chosenLabels.isEmpty else { return "(no options selected)" }
+                let quoted = q.chosenLabels.map { "\"\($0)\"" }.joined(separator: ", ")
+                return "[\(quoted)]"
+            } else {
+                return q.chosenLabels.first ?? "(no answer)"
+            }
+        }
+
+        if sorted.count == 1 {
+            return "User responded: \(answerSegment(sorted[0]))"
+        }
+        var lines = ["User responded:"]
+        for (i, q) in sorted.enumerated() {
+            lines.append("\(i + 1). \(q.header) → \(answerSegment(q))")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// Tail changeStream until the row's status flips. `lattice.changeStream`

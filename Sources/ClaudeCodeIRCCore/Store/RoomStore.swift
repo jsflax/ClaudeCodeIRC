@@ -22,6 +22,8 @@ public enum RoomStore {
         ApprovalRequest.self,
         ApprovalPolicy.self,
         ApprovalVote.self,
+        AskQuestion.self,
+        AskVote.self,
         HostHandoff.self,
     ]
 

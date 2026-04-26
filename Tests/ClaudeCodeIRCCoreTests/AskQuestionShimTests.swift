@@ -170,6 +170,117 @@ import ClaudeCodeIRCCore
         #expect(!message.contains("metrics"))
     }
 
+    @Test func exitPlanModeApprovedAutoMode() async throws {
+        let binPath = try locateCCIRCBinary()
+        let tmp = FileManager.default.temporaryDirectory
+            .appending(path: "ccirc-plan-shim-\(UUID().uuidString).lattice")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let testLattice = try Lattice(
+            for: RoomStore.schema,
+            configuration: .init(fileURL: tmp))
+
+        // Seed a Session so the shim's setSessionMode has a row to
+        // mutate. Without this, the mode write silently no-ops and
+        // the test can't observe the flip. permissionMode starts at
+        // .default to make the .auto flip detectable.
+        let seeded = Session()
+        seeded.code = "ask-xproc-test"
+        seeded.name = "test"
+        seeded.cwd = "/tmp"
+        seeded.permissionMode = .default
+        testLattice.add(seeded)
+
+        let process = try spawnShim(binPath: binPath, latticePath: tmp.path)
+        defer { if process.process.isRunning { process.process.terminate() } }
+        let client = Client(name: "ccirc-plan-xproc-1", version: "1")
+        _ = try await client.connect(transport: process.transport)
+        defer { Task { await client.disconnect() } }
+
+        async let callResult = client.callTool(
+            name: "approve",
+            arguments: [
+                "tool_name": .string("ExitPlanMode"),
+                "input": .object([
+                    "plan": .string("# my plan\n\nstep 1\nstep 2"),
+                ]),
+            ])
+
+        let qs = try await waitForAskQuestions(
+            testLattice: testLattice, expecting: 1, timeoutSeconds: 10)
+        let q = qs[0]
+        #expect(q.options.count == 4)
+        #expect(q.header == "# my plan\n\nstep 1\nstep 2")
+
+        q.status = .answered
+        q.chosenLabels = ["Yes — auto mode"]
+        q.answeredAt = Date()
+
+        let json = try await decisionJson(callResult)
+        let decision = try JSONSerialization.jsonObject(
+            with: Data(json.utf8)) as! [String: Any]
+        #expect(decision["behavior"] as? String == "allow")
+
+        // Side-effect: session.permissionMode should now be .auto.
+        // Refetch from the same testLattice — the shim writes via
+        // its own handle on the same SQLite file.
+        guard let session = testLattice.objects(Session.self).first
+        else { Issue.record("session row vanished"); return }
+        #expect(session.permissionMode == .auto)
+    }
+
+    @Test func exitPlanModeDeclinedWithReason() async throws {
+        let binPath = try locateCCIRCBinary()
+        let tmp = FileManager.default.temporaryDirectory
+            .appending(path: "ccirc-plan-shim-\(UUID().uuidString).lattice")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let testLattice = try Lattice(
+            for: RoomStore.schema,
+            configuration: .init(fileURL: tmp))
+
+        let seeded = Session()
+        seeded.code = "ask-xproc-test"
+        seeded.permissionMode = .default
+        testLattice.add(seeded)
+
+        let process = try spawnShim(binPath: binPath, latticePath: tmp.path)
+        defer { if process.process.isRunning { process.process.terminate() } }
+        let client = Client(name: "ccirc-plan-xproc-2", version: "1")
+        _ = try await client.connect(transport: process.transport)
+        defer { Task { await client.disconnect() } }
+
+        async let callResult = client.callTool(
+            name: "approve",
+            arguments: [
+                "tool_name": .string("ExitPlanMode"),
+                "input": .object([
+                    "plan": .string("rewrite the auth flow"),
+                ]),
+            ])
+
+        let qs = try await waitForAskQuestions(
+            testLattice: testLattice, expecting: 1, timeoutSeconds: 10)
+        let q = qs[0]
+        // Free-text answer via Other… would land here as a custom
+        // label. Test the shim's "any label not in the canonical 4"
+        // path by setting chosenLabels directly.
+        q.status = .answered
+        q.chosenLabels = ["too risky"]
+        q.answeredAt = Date()
+
+        let json = try await decisionJson(callResult)
+        let decision = try JSONSerialization.jsonObject(
+            with: Data(json.utf8)) as! [String: Any]
+        #expect(decision["behavior"] as? String == "deny")
+        let message = decision["message"] as? String ?? ""
+        #expect(message == "User declined the plan: too risky")
+
+        // Side-effect: mode stays at .default — decline shouldn't
+        // touch session.permissionMode.
+        guard let session = testLattice.objects(Session.self).first
+        else { Issue.record("session row vanished"); return }
+        #expect(session.permissionMode == .default)
+    }
+
     @Test func cancelledReturnsDeclineMessage() async throws {
         let binPath = try locateCCIRCBinary()
         let tmp = FileManager.default.temporaryDirectory

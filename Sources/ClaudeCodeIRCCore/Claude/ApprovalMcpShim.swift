@@ -143,6 +143,34 @@ public enum ApprovalMcpShim {
             return await handleAskQuestion(input: originalInput, lattice: lattice)
         }
 
+        // ExitPlanMode is a plan-vote prompt with mode side-effects,
+        // also handled bespoke. Same branch-before-Approval pattern.
+        if toolName == "ExitPlanMode" {
+            return await handleExitPlanMode(input: originalInput, lattice: lattice)
+        }
+
+        // Permission-mode pass-through. The two special handlers above
+        // (AskUserQuestion / ExitPlanMode) have already run, so this
+        // only affects "normal" tools (Bash, Edit, Write, …):
+        //   - .auto / .bypassPermissions: short-circuit allow.
+        //     `.auto` delegates safety to claude's own server-side
+        //     classifier; `.bypassPermissions` is the deliberate
+        //     no-guards mode reachable only by explicit code path.
+        //   - .default / .plan: fall through to the room vote (the
+        //     "manually approve" path; in plan mode claude already
+        //     self-restricts to read-only tools).
+        //   - .acceptEdits: deferred — wired in a follow-up.
+        if let session = lattice.objects(Session.self).first {
+            switch session.permissionMode {
+            case .auto, .bypassPermissions:
+                Log.line("mcp-shim",
+                    "\(session.permissionMode.label)-mode pass-through tool=\(toolName)")
+                return .init(behavior: .allow, updatedInput: originalInput, message: nil)
+            case .default, .plan, .acceptEdits:
+                break  // fall through to normal approval flow
+            }
+        }
+
         // Short-circuit on a sticky policy — "always allow Bash" set
         // by a previous [A] press means every subsequent Bash call in
         // this room bypasses the overlay entirely.
@@ -158,14 +186,14 @@ public enum ApprovalMcpShim {
 
         Log.line("mcp-shim", "approve request: \(summary)")
 
-        // Hard invariant: AskUserQuestion must NEVER produce an
-        // ApprovalRequest row — it's an answer prompt, not a
-        // permission prompt. The early-return above already covers
-        // this; the assertion catches future refactors that move
-        // the branch point or introduce new code paths reaching
-        // here. Ships as a no-op in release builds.
-        assert(toolName != "AskUserQuestion",
-               "AskUserQuestion must be handled by handleAskQuestion, not as an Approval")
+        // Hard invariant: AskUserQuestion / ExitPlanMode must NEVER
+        // produce an ApprovalRequest row — they're answer / plan-vote
+        // prompts, not permission prompts. The early-return branches
+        // above already cover this; the assertion catches future
+        // refactors that move the branch point or introduce new code
+        // paths reaching here. Ships as a no-op in release builds.
+        assert(toolName != "AskUserQuestion" && toolName != "ExitPlanMode",
+               "\(toolName) must be handled by its bespoke branch, not as an Approval")
 
         let req = ApprovalRequest()
         req.toolName = toolName
@@ -280,6 +308,115 @@ public enum ApprovalMcpShim {
         let message = formatGroupReply(finals)
         Log.line("ask-shim", "group answered (\(finals.count) questions)")
         return .init(behavior: .deny, updatedInput: nil, message: message)
+    }
+
+    // MARK: - ExitPlanMode handler
+
+    /// Constants for the four post-plan options. Match strings live
+    /// in both the option list and the shim's reply dispatch — keep
+    /// them in one place so a typo in either side fails loudly.
+    private enum PlanChoice {
+        static let yesAuto    = "Yes — auto mode"
+        static let yesManual  = "Yes — manually approve edits"
+        static let decline    = "Decline"
+        static let declineRsn = "Decline with reason"
+    }
+
+    /// Intercepts `ExitPlanMode` calls. Renders the plan markdown as
+    /// a question card with 4 fixed options (auto / manual / decline
+    /// / decline-with-reason). The chosen label drives both the
+    /// MCP reply (allow vs deny) and a side-effect on
+    /// `Session.permissionMode` for the "yes" paths.
+    ///
+    /// Reuses the AskQuestion machinery (D11) — same coordinator,
+    /// same card view, same "Other…" free-text overlay. Differs
+    /// only in how the answer translates back to claude.
+    private static func handleExitPlanMode(input: Value, lattice: Lattice) async -> Decision {
+        let plan: String = {
+            if case .object(let dict) = input,
+               case .string(let p)? = dict["plan"] {
+                return p
+            }
+            return "(no plan provided)"
+        }()
+
+        let toolUseId = UUID().uuidString
+        let options: [AskOption] = [
+            AskOption(label: PlanChoice.yesAuto,
+                      optionDescription: "Approve plan; subsequent tool calls auto-allowed (claude's auto mode safety classifier still applies)."),
+            AskOption(label: PlanChoice.yesManual,
+                      optionDescription: "Approve plan; the room votes on each Edit/Write/Bash as before."),
+            AskOption(label: PlanChoice.decline,
+                      optionDescription: "Reject the plan. Claude stays in plan mode."),
+            AskOption(label: PlanChoice.declineRsn,
+                      optionDescription: "Reject with a reason — pick this to type a custom message."),
+        ]
+
+        var rowRef: ModelThreadSafeReference<AskQuestion>?
+        lattice.transaction {
+            let row = AskQuestion()
+            row.header = plan
+            row.options = options
+            row.multiSelect = false
+            row.status = .pending
+            row.toolUseId = toolUseId
+            row.groupIndex = 0
+            row.groupSize = 1
+            row.requestedAt = Date()
+            lattice.add(row)
+            rowRef = row.sendableReference
+        }
+        guard let rowRef else {
+            return .init(behavior: .deny, updatedInput: nil,
+                         message: "ExitPlanMode: failed to write plan card.")
+        }
+        Log.line("plan-shim", "queued plan card len=\(plan.count) toolUseId=\(toolUseId)")
+
+        await awaitGroupCompletion(rowRefs: [rowRef], lattice: lattice)
+
+        guard let q = rowRef.resolve(on: lattice) else {
+            return .init(behavior: .deny, updatedInput: nil,
+                         message: "ExitPlanMode: row vanished before resolution.")
+        }
+        if q.status == .cancelled {
+            let reason = q.cancelReason.isEmpty ? "cancelled" : q.cancelReason
+            return .init(behavior: .deny, updatedInput: nil,
+                         message: "User declined the plan: \(reason)")
+        }
+
+        let chosen = q.chosenLabels.first ?? ""
+        Log.line("plan-shim", "plan resolved chosen=\(chosen)")
+
+        switch chosen {
+        case PlanChoice.yesAuto:
+            setSessionMode(.auto, on: lattice)
+            return .init(behavior: .allow, updatedInput: input, message: nil)
+        case PlanChoice.yesManual:
+            setSessionMode(.default, on: lattice)
+            return .init(behavior: .allow, updatedInput: input, message: nil)
+        case PlanChoice.decline:
+            return .init(behavior: .deny, updatedInput: nil,
+                         message: "User declined the plan.")
+        default:
+            // Either the literal "Decline with reason" row (no extra
+            // text was entered before submit), or a free-text label
+            // from the Other… overlay. Both translate to declined +
+            // the chosen string as the rejection reason.
+            let reason = chosen.isEmpty ? "no reason given" : chosen
+            return .init(behavior: .deny, updatedInput: nil,
+                         message: "User declined the plan: \(reason)")
+        }
+    }
+
+    /// Single-property write wrapped in a transaction for shape
+    /// consistency with the rest of the shim's writes. Idempotent:
+    /// reading the row, mutating, committing.
+    private static func setSessionMode(_ mode: PermissionMode, on lattice: Lattice) {
+        guard let session = lattice.objects(Session.self).first else { return }
+        lattice.beginTransaction()
+        session.permissionMode = mode
+        lattice.commitTransaction()
+        Log.line("plan-shim", "session.permissionMode → \(mode.label)")
     }
 
     private static func awaitGroupCompletion(

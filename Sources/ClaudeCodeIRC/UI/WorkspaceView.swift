@@ -876,6 +876,18 @@ struct RoomPane: View {
     let askPendingBallot: Set<String>
 
     @Query(sort: \Turn.startedAt) var turns: TableResults<Turn>
+    /// Counted-only queries that drive the auto-scroll trigger. We
+    /// don't render from these directly (MessageListView has its own
+    /// queries), but their `count` changing is the cleanest way to
+    /// fire `.task(id:)` whenever any chat-stream row inserts.
+    @Query(sort: \ChatMessage.createdAt) var messages: TableResults<ChatMessage>
+    @Query(sort: \AssistantChunk.createdAt) var chunks: TableResults<AssistantChunk>
+
+    /// ScrollView offset state. Initialised to `Int.max`; the
+    /// ScrollView's `afterChildren` clamps to `contentH - viewportH`
+    /// on first render, so this naturally sits at the bottom on
+    /// open. Each new event re-pins via `.task(id: totalEventCount)`.
+    @State private var scrollOffset: Int = .max
 
     private var streamingTurn: Turn? {
         turns.first { $0.status == .streaming }
@@ -891,10 +903,20 @@ struct RoomPane: View {
         return max(1, paneHeight - 1 /* title strip */ - thinking)
     }
 
+    /// Sum of inserted chat-stream rows. Bumps on every new
+    /// ChatMessage / AssistantChunk insert, drives the auto-scroll
+    /// `.task(id:)`. Tied to two tables (not all RoomEvent sources)
+    /// because cards (Approval / AskQuestion) are visually
+    /// secondary; if we miss pinning on a card insert, the next
+    /// chat row re-pins. Cheap to add the others if needed.
+    private var totalEventCount: Int {
+        messages.count + chunks.count
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             titleStrip
-            ScrollView(height: scrollHeight) {
+            ScrollView(height: scrollHeight, offset: $scrollOffset) {
                 MessageListView(
                     isHost: room.isHost,
                     scrollbackFloor: room.scrollbackFloor,
@@ -902,6 +924,16 @@ struct RoomPane: View {
                     activeAskQuestionId: activeAskQuestionId,
                     askFocusedRow: askFocusedRow,
                     askPendingBallot: askPendingBallot)
+            }
+            // Auto-pin to bottom whenever a new chat-stream row
+            // inserts. ScrollView's afterChildren clamps `Int.max`
+            // to the real maxOffset, so we don't need to know the
+            // viewport / content sizes here. Trade-off: if the user
+            // scrolled up to read history, the next streaming chunk
+            // yanks them back to the bottom. Smart "preserve user
+            // scroll position" UX is a follow-up.
+            .task(id: totalEventCount) {
+                scrollOffset = .max
             }
             if let t = streamingTurn {
                 ClaudeThinkingView(turnId: t.globalId)

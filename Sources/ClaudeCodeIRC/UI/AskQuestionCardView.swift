@@ -56,7 +56,9 @@ struct AskQuestionCardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            topBorder
+            questionLines
+            spacerLine
             ForEach(Array(question.options.indices)) { idx in
                 optionRow(idx: idx, option: question.options[idx])
             }
@@ -69,22 +71,68 @@ struct AskQuestionCardView: View {
 
     // MARK: - Header
 
-    private var header: Text {
-        var line = Text("┌─ ").foregroundColor(accentColor)
-        line = line + Text("claude is asking: ").foregroundColor(.dim)
-        let q = question.header.count > 50
-            ? String(question.header.prefix(47)) + "..."
-            : question.header
-        line = line + Text(q).bold()
-        line = line + Text(" ").foregroundColor(accentColor)
-        line = line + Text("─").foregroundColor(accentColor)
-        line = line + Text(" ").foregroundColor(accentColor)
+    /// Top frame line. Status label + (k/n) annotation live here; the
+    /// question text gets its own wrapped block on the next rows so
+    /// long prompts don't have to fit on a single header line.
+    private var topBorder: Text {
         let group = question.groupSize > 1
             ? "\(statusLabel) (\(question.groupIndex + 1)/\(question.groupSize))"
             : statusLabel
+        // Card width is target 78 cols (matches the bottom border
+        // glyph count); pad the rule with ─ so the right edge ─┐
+        // lands flush. Saturating subtract guards against narrow
+        // terminals.
+        let prefix = "┌─ claude is asking "
+        let suffix = " \(group) ─┐"
+        let fill = max(3, 78 - prefix.count - suffix.count)
+        var line = Text("┌─ ").foregroundColor(accentColor)
+        line = line + Text("claude is asking ").foregroundColor(.dim)
+        line = line + Text(String(repeating: "─", count: fill))
+            .foregroundColor(accentColor)
+        line = line + Text(" ").foregroundColor(accentColor)
         line = line + Text(group).foregroundColor(statusColor)
         line = line + Text(" ─┐").foregroundColor(accentColor)
         return line
+    }
+
+    /// Wrapped question text — one row per visual line, each prefixed
+    /// with `│ `. Word-wraps at 73 columns (78 card width minus the
+    /// `│ ` left frame and a 2-col right margin) so even long prompts
+    /// stay readable instead of getting `…`-truncated.
+    private var questionLines: some View {
+        let lines = Self.wrapWords(question.header, width: 73)
+        return VStack(spacing: 0) {
+            ForEach(Array(lines.indices)) { idx in
+                Text("│ ").foregroundColor(accentColor)
+                    + Text(lines[idx]).bold()
+            }
+        }
+    }
+
+    /// Greedy word wrap — splits `text` on whitespace and packs words
+    /// into lines no wider than `width`. Single words longer than the
+    /// limit are emitted on their own line (no mid-word breaks). At
+    /// least one entry is returned even for empty input so the card
+    /// always reserves a question row.
+    static func wrapWords(_ text: String, width: Int) -> [String] {
+        guard width > 0 else { return [text] }
+        let words = text.split(separator: " ", omittingEmptySubsequences: true)
+        guard !words.isEmpty else { return [""] }
+        var lines: [String] = []
+        var current = ""
+        for word in words {
+            let w = String(word)
+            if current.isEmpty {
+                current = w
+            } else if current.count + 1 + w.count <= width {
+                current += " " + w
+            } else {
+                lines.append(current)
+                current = w
+            }
+        }
+        if !current.isEmpty { lines.append(current) }
+        return lines
     }
 
     // MARK: - Option rows

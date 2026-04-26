@@ -3,133 +3,115 @@ import Foundation
 import class Lattice.TableResults
 import NCursesUI
 
-/// Inline box-drawing card for an `ApprovalRequest`. Replaces the old
-/// modal `ApprovalOverlayView` per the design handoff — the card flows
-/// in scrollback alongside chat messages so every member sees the
-/// in-flight tool call, current vote state, and final outcome.
+/// Inline card for an `ApprovalRequest`. Reuses NCursesUI's `CardView`
+/// primitive — the framework owns box drawing + the reverse-video
+/// header chip; this file just supplies the title / trailing /
+/// content / footer payloads.
 ///
-/// Card shape:
+/// Layout matches the IRC design reference:
 /// ```
-/// ┌─ claude wants to use Bash ──────────────── pending ─┐
-/// │ touch /tmp/probe && ls -la /tmp/probe                │
-/// │                                                      │
-/// │ yes: alice, bob ✓   no: carol ✗   quorum: 3 / 4      │
-/// │ [Y] vote allow   [D] vote deny   [A] always-allow    │
-/// └──────────────────────────────────────────────────────┘
+/// ┌──┤ claude wants to use Bash ├─────── pending ─┐
+/// │ ls ~/Projects/ | head -20 && which carg…       │
+/// │ yes: alice, bob ✓   no: carol ✗   quorum: 3/4  │
+/// ├────────────────────────────────────────────────┤
+/// │ [Y] vote allow  [D] vote deny  [A] always-allow│
+/// └────────────────────────────────────────────────┘
 /// ```
-/// Decided cards drop the action line and show the outcome + quorum
-/// snapshot.
-///
-/// Keypress routing stays on `WorkspaceView`. Y/D cast votes via
-/// `ApprovalVote` rows; [A] remains host-only always-allow (writes
-/// an `ApprovalPolicy` and bypasses the vote).
+/// Approval colours are palette-aware: pending borders use `.accent`,
+/// decided cards drop to `.mute`, yes/no tallies use `.ok` / `.danger`.
 struct ApprovalCardView: View {
     let request: ApprovalRequest
     let isHost: Bool
 
     @Query var members: TableResults<Member>
-    @Environment(\.palette) var palette
 
     var body: some View {
+        CardView(
+            title: titleText,
+            trailing: trailingText,
+            footer: actionFooter,
+            accent: accentRole,
+            content: { contentBody }
+        )
+    }
+
+    // MARK: - Header
+
+    private var titleText: Text {
+        Text("claude wants to use ").paletteColor(.dim)
+            + Text(request.toolName).bold()
+    }
+
+    private var trailingText: Text {
+        Text(statusLabel).paletteColor(statusRole)
+    }
+
+    // MARK: - Content rows
+
+    @ViewBuilder
+    private var contentBody: some View {
         VStack(spacing: 0) {
-            header
-            bodyLine
-            tallyLine
-            actionLine
-            footer
+            commandRow
+            tallyRow
         }
     }
 
-    // MARK: - Sections
-
-    private var header: Text {
-        var line = Text("┌─ ").foregroundColor(accentColor)
-        line = line + Text("claude wants to use ").foregroundColor(.dim)
-        line = line + Text(request.toolName).bold()
-        line = line + Text(" ").foregroundColor(accentColor)
-        let fill = String(repeating: "─", count: max(1, 32 - request.toolName.count))
-        line = line + Text(fill).foregroundColor(accentColor)
-        line = line + Text(" ").foregroundColor(accentColor)
-        line = line + Text(statusLabel).foregroundColor(statusColor)
-        line = line + Text(" ─┐").foregroundColor(accentColor)
-        return line
-    }
-
-    private var bodyLine: Text {
-        // toolInput is a JSON blob — show the first line for
-        // readability; D8 adds syntax-aware rendering for common tools.
-        let preview = request.toolInput
-            .components(separatedBy: "\n")
-            .first
-            .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-        let truncated = preview.count > 70
-            ? String(preview.prefix(67)) + "..."
-            : preview
-        var line = Text("│ ").foregroundColor(accentColor)
-        line = line + Text(truncated).foregroundColor(.white)
-        return line
+    /// Single-line preview of the tool input — extracts the canonical
+    /// field (`command`, `file_path`, `pattern`, …) so Bash approvals
+    /// read as the bash command, not its JSON wrapping.
+    private var commandRow: Text {
+        let preview = ToolInputSummary.summarise(request.toolInput, limit: 110)
+        return Text(preview).paletteColor(.fg)
     }
 
     /// "yes: alice, bob ✓   no: carol ✗   quorum: 2 / 3"
-    private var tallyLine: Text {
+    private var tallyRow: Text {
         let (yesNicks, noNicks) = voteBreakdown()
         let presentQuorum = members.filter { !$0.isAway }.count
-        var line = Text("│ ").foregroundColor(accentColor)
-        line = line + Text("yes: ").foregroundColor(.dim)
+        var line = Text("yes: ").paletteColor(.dim)
         line = line + Text(yesNicks.isEmpty ? "—" : yesNicks.joined(separator: ", "))
-            .foregroundColor(.green)
-        line = line + Text("   no: ").foregroundColor(.dim)
+            .paletteColor(.ok)
+        line = line + Text("   no: ").paletteColor(.dim)
         line = line + Text(noNicks.isEmpty ? "—" : noNicks.joined(separator: ", "))
-            .foregroundColor(.red)
-        line = line + Text("   quorum: ").foregroundColor(.dim)
+            .paletteColor(.danger)
+        line = line + Text("   quorum: ").paletteColor(.dim)
         line = line + Text("\(yesNicks.count + noNicks.count) / \(presentQuorum)")
-            .foregroundColor(.yellow)
+            .paletteColor(.accent)
         return line
     }
 
-    private var actionLine: Text {
-        var line = Text("│ ").foregroundColor(accentColor)
+    // MARK: - Footer
+
+    private var actionFooter: Text? {
         switch request.status {
         case .pending:
-            line = line + Text("[Y]").foregroundColor(.green).bold()
-            line = line + Text(" vote allow   ").foregroundColor(.dim)
-            line = line + Text("[D]").foregroundColor(.red).bold()
-            line = line + Text(" vote deny").foregroundColor(.dim)
+            var line = Text("[Y]").paletteColor(.ok).bold()
+            line = line + Text(" vote allow   ").paletteColor(.dim)
+            line = line + Text("[D]").paletteColor(.danger).bold()
+            line = line + Text(" vote deny").paletteColor(.dim)
             if isHost {
-                line = line + Text("   ").foregroundColor(.dim)
-                line = line + Text("[A]").foregroundColor(.yellow).bold()
-                line = line + Text(" always-allow").foregroundColor(.dim)
+                line = line + Text("   ").paletteColor(.dim)
+                line = line + Text("[A]").paletteColor(.accent).bold()
+                line = line + Text(" always-allow").paletteColor(.dim)
             }
+            return line
         case .approved:
             if let by = request.decidedBy?.nick {
-                line = line + Text("✓ always-allowed by ").foregroundColor(.green)
-                line = line + Text(by).foregroundColor(.green).bold()
-            } else {
-                line = line + Text("✓ approved by quorum").foregroundColor(.green)
+                return Text("✓ always-allowed by ").paletteColor(.ok)
+                     + Text(by).paletteColor(.ok).bold()
             }
+            return Text("✓ approved by quorum").paletteColor(.ok)
         case .denied:
             if let by = request.decidedBy?.nick {
-                line = line + Text("✗ denied by ").foregroundColor(.red)
-                line = line + Text(by).foregroundColor(.red).bold()
-            } else {
-                line = line + Text("✗ denied by quorum").foregroundColor(.red)
+                return Text("✗ denied by ").paletteColor(.danger)
+                     + Text(by).paletteColor(.danger).bold()
             }
+            return Text("✗ denied by quorum").paletteColor(.danger)
         }
-        return line
-    }
-
-    private var footer: Text {
-        Text("└─────────────────────────────────────────────────────────┘")
-            .foregroundColor(accentColor)
     }
 
     // MARK: - Tally helpers
 
-    /// Walk the request's `votes` relation once, collecting yes / no
-    /// voter nicks. Iterates lazily (no Array materialisation) and
-    /// keeps only the latest vote per voter so a flip from Y→D
-    /// doesn't double-count. The on-disk unique constraint should
-    /// already enforce uniqueness, but this reader is defensive.
     private func voteBreakdown() -> (yes: [String], no: [String]) {
         var latest: [UUID: ApprovalVote] = [:]
         for vote in request.votes {
@@ -163,17 +145,17 @@ struct ApprovalCardView: View {
         }
     }
 
-    private var statusColor: Color {
+    private var statusRole: Palette.Role {
         switch request.status {
-        case .pending:  return .yellow
-        case .approved: return .green
-        case .denied:   return .red
+        case .pending:  return .accent
+        case .approved: return .ok
+        case .denied:   return .danger
         }
     }
 
-    private var accentColor: Color {
-        // Decided cards read as "settled" — dim the frame so they
-        // don't pull eye attention away from still-pending work.
-        request.status == .pending ? .yellow : .dim
+    private var accentRole: Palette.Role {
+        // Decided cards drop to `.mute` so they read as "settled"
+        // and don't pull eye attention from in-flight work.
+        request.status == .pending ? .accent : .mute
     }
 }

@@ -3,28 +3,17 @@ import Foundation
 import class Lattice.TableResults
 import NCursesUI
 
-/// Inline card for an `AskQuestion`. Parallels `ApprovalCardView` but
-/// renders an option list with focus marker + checkboxes instead of
-/// yes/no. Display-only: the parent (`WorkspaceView`) owns row-focus
-/// state and writes ballots / appended options on keypress.
+/// Inline card for an `AskQuestion`. Wraps the question header (which
+/// can be multi-paragraph markdown — used by ExitPlanMode plans) in
+/// an option list with focus marker + checkboxes. Display-only: the
+/// parent (`WorkspaceView`) owns row-focus state and writes ballots /
+/// appended options on keypress.
 ///
-/// Card shape (single-select):
-/// ```
-/// ┌─ claude is asking: What should the test cover? ─ pending (1/2) ─┐
-/// │ ▸ [x] edge cases                              alice, bob         │
-/// │   [ ] happy path                              carol              │
-/// │   [ ] concurrency                                                │
-/// │   [ ] "write property-based tests" — by dave                     │
-/// │   [ ] Other… (type answer)                                       │
-/// │                                                                   │
-/// │ quorum: 3 / 3   ↑/↓ move · Enter vote · Esc unfocus              │
-/// └──────────────────────────────────────────────────────────────────┘
-/// ```
-///
-/// Multi-select adds a `Tab commit` hint and shows
-/// `⏳ commit (k/n done)` instead of `Enter vote` until everyone has
-/// submitted. `[x]` reflects either the persisted ballot for
-/// single-select or the local pending-ballot set for multi-select.
+/// Card chrome (top/bottom borders, reverse-video header chip,
+/// inner divider before footer) is delegated to NCursesUI's
+/// `CardView` — this file just supplies the title / trailing /
+/// content / footer payloads. Width is dynamic to the layout pass
+/// so terminal resize naturally reflows.
 struct AskQuestionCardView: View {
     let question: AskQuestion
     /// Currently-focused row index, owned by `WorkspaceView` so the
@@ -39,100 +28,60 @@ struct AskQuestionCardView: View {
     /// dim out the focus indicator.
     let isFocused: Bool
     /// The local member, used to identify "this client's vote" for
-    /// the `[x]` checkbox column. Threaded down from
-    /// `WorkspaceView` (matches how `ApprovalCardView` would render
-    /// per-user state if it needed to).
+    /// the `[x]` checkbox column.
     let selfMember: Member?
 
     @Query var members: TableResults<Member>
-    @Environment(\.palette) var palette
 
     /// Sentinel row index for the trailing "Other…" entry. Lives just
     /// past `question.options.count`.
     var otherRowIndex: Int { question.options.count }
 
-    /// Total selectable rows, including "Other…".
-    var totalRows: Int { question.options.count + 1 }
-
     var body: some View {
+        CardView(
+            title: Text("claude is asking"),
+            trailing: Text(statusLabelWithGroup).paletteColor(statusRole),
+            footer: footerLine,
+            accent: accentRole,
+            content: { contentBody }
+        )
+    }
+
+    // MARK: - Header bits
+
+    private var statusLabelWithGroup: String {
+        let base = statusLabel
+        return question.groupSize > 1
+            ? "\(base) (\(question.groupIndex + 1)/\(question.groupSize))"
+            : base
+    }
+
+    // MARK: - Content body
+
+    @ViewBuilder
+    private var contentBody: some View {
         VStack(spacing: 0) {
-            topBorder
             questionLines
-            spacerLine
+            SpacerView(1)
             ForEach(Array(question.options.indices)) { idx in
                 optionRow(idx: idx, option: question.options[idx])
             }
             otherRow
-            spacerLine
-            footer
-            bottomBorder
         }
     }
 
-    // MARK: - Header
-
-    /// Top frame line. Status label + (k/n) annotation live here; the
-    /// question text gets its own wrapped block on the next rows so
-    /// long prompts don't have to fit on a single header line.
-    private var topBorder: Text {
-        let group = question.groupSize > 1
-            ? "\(statusLabel) (\(question.groupIndex + 1)/\(question.groupSize))"
-            : statusLabel
-        // Card width is target 78 cols (matches the bottom border
-        // glyph count); pad the rule with ─ so the right edge ─┐
-        // lands flush. Saturating subtract guards against narrow
-        // terminals.
-        let prefix = "┌─ claude is asking "
-        let suffix = " \(group) ─┐"
-        let fill = max(3, 78 - prefix.count - suffix.count)
-        var line = Text("┌─ ").foregroundColor(accentColor)
-        line = line + Text("claude is asking ").foregroundColor(.dim)
-        line = line + Text(String(repeating: "─", count: fill))
-            .foregroundColor(accentColor)
-        line = line + Text(" ").foregroundColor(accentColor)
-        line = line + Text(group).foregroundColor(statusColor)
-        line = line + Text(" ─┐").foregroundColor(accentColor)
-        return line
-    }
-
-    /// Wrapped question text — one row per visual line, each prefixed
-    /// with `│ `. Word-wraps at 73 columns (78 card width minus the
-    /// `│ ` left frame and a 2-col right margin) so even long prompts
-    /// stay readable instead of getting `…`-truncated.
+    /// Each line of the (possibly multi-paragraph) question header
+    /// rendered through `Text(markdown:)` so `**bold**`, backtick code,
+    /// and `# heading` style cleanly. Pre-split on `\n` so embedded
+    /// newlines don't fall through to NCursesUI's wrap path
+    /// (which can drop the `│` left frame on continuation rows).
+    @ViewBuilder
     private var questionLines: some View {
-        let lines = Self.wrapWords(question.header, width: 73)
-        return VStack(spacing: 0) {
-            ForEach(Array(lines.indices)) { idx in
-                Text("│ ").foregroundColor(accentColor)
-                    + Text(lines[idx]).bold()
-            }
+        let lines = question.header.split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        ForEach(Array(lines.indices)) { idx in
+            Text(markdown: lines[idx])
         }
-    }
-
-    /// Greedy word wrap — splits `text` on whitespace and packs words
-    /// into lines no wider than `width`. Single words longer than the
-    /// limit are emitted on their own line (no mid-word breaks). At
-    /// least one entry is returned even for empty input so the card
-    /// always reserves a question row.
-    static func wrapWords(_ text: String, width: Int) -> [String] {
-        guard width > 0 else { return [text] }
-        let words = text.split(separator: " ", omittingEmptySubsequences: true)
-        guard !words.isEmpty else { return [""] }
-        var lines: [String] = []
-        var current = ""
-        for word in words {
-            let w = String(word)
-            if current.isEmpty {
-                current = w
-            } else if current.count + 1 + w.count <= width {
-                current += " " + w
-            } else {
-                lines.append(current)
-                current = w
-            }
-        }
-        if !current.isEmpty { lines.append(current) }
-        return lines
     }
 
     // MARK: - Option rows
@@ -142,82 +91,71 @@ struct AskQuestionCardView: View {
         let isChecked = isLabelChecked(option.label)
         let voters = votersFor(label: option.label)
 
-        var line = Text("│ ").foregroundColor(accentColor)
-        line = line + Text(isFocusedRow ? "▸ " : "  ").foregroundColor(.yellow)
+        var line = Text(isFocusedRow ? "▸ " : "  ").paletteColor(.accent)
         line = line + Text(isChecked ? "[x] " : "[ ] ")
-            .foregroundColor(isChecked ? .green : .dim)
-        line = line + Text(option.label).foregroundColor(.white)
+            .paletteColor(isChecked ? .ok : .mute)
+        line = line + Text(option.label).paletteColor(.fg)
         if !option.submittedByNick.isEmpty {
-            line = line + Text(" — by ").foregroundColor(.dim)
-            line = line + Text(option.submittedByNick).foregroundColor(.dim)
+            line = line + Text(" — by ").paletteColor(.dim)
+            line = line + Text(option.submittedByNick).paletteColor(.dim)
         }
         if !voters.isEmpty {
-            line = line + Text("   ").foregroundColor(.dim)
-            line = line + Text(voters.joined(separator: ", ")).foregroundColor(.dim)
+            line = line + Text("   ").paletteColor(.dim)
+            line = line + Text(voters.joined(separator: ", ")).paletteColor(.dim)
         }
         return line
     }
 
     private var otherRow: Text {
         let isFocusedRow = isFocused && focusedRow == otherRowIndex
-        var line = Text("│ ").foregroundColor(accentColor)
-        line = line + Text(isFocusedRow ? "▸ " : "  ").foregroundColor(.yellow)
-        line = line + Text("[ ] ").foregroundColor(.dim)
-        line = line + Text("Other… (type answer)").foregroundColor(.dim)
+        var line = Text(isFocusedRow ? "▸ " : "  ").paletteColor(.accent)
+        line = line + Text("[ ] ").paletteColor(.mute)
+        line = line + Text("Other… (type answer)").paletteColor(.dim)
         return line
     }
 
     // MARK: - Footer
 
-    private var spacerLine: Text {
-        Text("│").foregroundColor(accentColor)
-    }
-
-    private var footer: Text {
+    private var footerLine: Text {
         let presentQuorum = members.filter { !$0.isAway }.count
         let ballotCount = uniqueBallotVoters().count
-        var line = Text("│ ").foregroundColor(accentColor)
 
         switch question.status {
         case .pending:
-            line = line + Text("quorum: ").foregroundColor(.dim)
+            var line = Text("quorum: ").paletteColor(.dim)
             line = line + Text("\(ballotCount) / \(presentQuorum)")
-                .foregroundColor(.yellow)
-            line = line + Text("   ").foregroundColor(.dim)
+                .paletteColor(.accent)
+            line = line + Text("   ").paletteColor(.dim)
             if question.multiSelect {
                 line = line + Text("↑/↓ move · Enter toggle · Tab commit")
-                    .foregroundColor(.dim)
+                    .paletteColor(.dim)
             } else {
                 line = line + Text("↑/↓ move · Enter vote · Esc unfocus")
-                    .foregroundColor(.dim)
+                    .paletteColor(.dim)
             }
+            return line
         case .answered:
-            line = line + answeredLine()
+            return answeredFooterLine()
         case .cancelled:
-            line = line + Text("✗ cancelled").foregroundColor(.red)
+            var line = Text("✗ cancelled").paletteColor(.danger)
             if !question.cancelReason.isEmpty {
                 line = line + Text(" — \(question.cancelReason)")
-                    .foregroundColor(.dim)
+                    .paletteColor(.dim)
             }
+            return line
         }
-        return line
     }
 
-    private func answeredLine() -> Text {
+    private func answeredFooterLine() -> Text {
         if question.chosenLabels.isEmpty {
             return Text("✓ answered: none of the options (by quorum)")
-                .foregroundColor(.green)
+                .paletteColor(.ok)
         }
         let quoted = question.chosenLabels.map { "\"\($0)\"" }.joined(separator: ", ")
-        var l = Text("✓ answered: ").foregroundColor(.green)
-        l = l + Text(quoted).foregroundColor(.green).bold()
-        l = l + Text(" (by quorum)").foregroundColor(.dim)
+        var l = Text("✓ answered: ").paletteColor(.ok)
+        l = l + Text(quoted).paletteColor(.ok).bold()
+        l = l + Text(" (by quorum)").paletteColor(.dim)
         return l
-    }
-
-    private var bottomBorder: Text {
-        Text("└─────────────────────────────────────────────────────────────────┘")
-            .foregroundColor(accentColor)
     }
 
     // MARK: - Tally helpers
@@ -230,7 +168,6 @@ struct AskQuestionCardView: View {
         if question.multiSelect, !pendingBallot.isEmpty {
             return pendingBallot.contains(label)
         }
-        // Match against this user's persisted ballot.
         for vote in question.votes where vote.voter?.globalId == selfGlobalId {
             return vote.chosenLabels.contains(label)
         }
@@ -239,8 +176,6 @@ struct AskQuestionCardView: View {
 
     private var selfGlobalId: UUID? { selfMember?.globalId }
 
-    /// Per-label voter nicks. For pending questions, walks `votes`
-    /// and counts each ballot once per (voter, label) pair.
     private func votersFor(label: String) -> [String] {
         var nicks: [String] = []
         for vote in question.votes {
@@ -253,8 +188,6 @@ struct AskQuestionCardView: View {
         return nicks
     }
 
-    /// Count of unique voters who've cast any ballot — drives
-    /// `quorum: k/n` and the multi-select "commit done" indicator.
     private func uniqueBallotVoters() -> Set<UUID> {
         var ids: Set<UUID> = []
         for vote in question.votes {
@@ -273,15 +206,15 @@ struct AskQuestionCardView: View {
         }
     }
 
-    private var statusColor: Color {
+    private var statusRole: Palette.Role {
         switch question.status {
-        case .pending:   return .yellow
-        case .answered:  return .green
-        case .cancelled: return .red
+        case .pending:   return .accent
+        case .answered:  return .ok
+        case .cancelled: return .danger
         }
     }
 
-    private var accentColor: Color {
-        question.status == .pending ? .yellow : .dim
+    private var accentRole: Palette.Role {
+        question.status == .pending ? .accent : .mute
     }
 }

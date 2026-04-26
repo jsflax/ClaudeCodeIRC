@@ -33,14 +33,14 @@ struct ToolEventRow: View {
 
     private var headerRow: Text {
         let time = Self.timeString(event.startedAt)
-        var line = Text("\(time) ").foregroundColor(.dim)
-        line = line + Text("├─ ").foregroundColor(prefixColor)
-        line = line + Text("\(icon) ").foregroundColor(prefixColor)
-        line = line + Text(event.name).bold()
+        var line = Text("\(time) ").paletteColor(.dim)
+        line = line + Text("├─ ").paletteColor(prefixRole)
+        line = line + Text("\(icon) ").paletteColor(prefixRole)
+        line = line + Text(event.name).bold().paletteColor(.accent)
         let preview = inputPreview()
         if !preview.isEmpty {
-            line = line + Text("  ").foregroundColor(.dim)
-            line = line + Text(preview).foregroundColor(.dim)
+            line = line + Text("  ").paletteColor(.dim)
+            line = line + Text(preview).paletteColor(.dim)
         }
         return line
     }
@@ -99,23 +99,23 @@ struct ToolEventRow: View {
     }
 
     private func todoRow(_ item: TodoItem) -> Text {
-        var line = Text("        ").foregroundColor(.dim) // align under tool body
+        var line = Text("        ").paletteColor(.dim) // align under tool body
         let glyph: String
-        let glyphColor: Color
+        let glyphRole: Palette.Role
         switch item.status {
         case "completed":
             glyph = "[x]"
-            glyphColor = .green
+            glyphRole = .ok
         case "in_progress":
             glyph = "[~]"
-            glyphColor = .yellow
+            glyphRole = .accent
         default:
             glyph = "[ ]"
-            glyphColor = .dim
+            glyphRole = .mute
         }
-        line = line + Text("\(glyph) ").foregroundColor(glyphColor)
-        let textColor: Color = item.status == "completed" ? .dim : .white
-        line = line + Text(item.content).foregroundColor(textColor)
+        line = line + Text("\(glyph) ").paletteColor(glyphRole)
+        let textRole: Palette.Role = item.status == "completed" ? .dim : .fg
+        line = line + Text(item.content).paletteColor(textRole)
         return line
     }
 
@@ -135,36 +135,21 @@ struct ToolEventRow: View {
     }
 
     private func resultHeaderLine(mark: String, body: String) -> Text {
-        var line = Text("      ").foregroundColor(.dim)  // align under HH:MM
-        line = line + Text("└─ ").foregroundColor(prefixColor)
-        line = line + Text("\(mark) ").foregroundColor(statusColor)
+        var line = Text("      ").paletteColor(.dim)  // align under HH:MM
+        line = line + Text("└─ ").paletteColor(prefixRole)
+        line = line + Text("\(mark) ").paletteColor(statusRole)
         if !body.isEmpty {
-            line = line + Text(body).foregroundColor(.dim)
+            line = line + Text(body).paletteColor(.dim)
         }
         return line
     }
 
     // MARK: - Previews
 
-    /// One-line summary of the tool's input. Pulls a few well-known
-    /// fields when the input is JSON (file_path, command, pattern,
-    /// description) so the line reads "Read foo.swift" rather than
-    /// `{"file_path":"foo.swift"}`. Falls back to a truncated raw
-    /// JSON when the schema is unfamiliar.
+    /// One-line summary of the tool's input via the shared
+    /// `ToolInputSummary` helper.
     private func inputPreview() -> String {
-        let raw = event.input
-        guard !raw.isEmpty else { return "" }
-        if let obj = parseJsonObject(raw) {
-            // Most-common identifiers in priority order. Picks the
-            // first non-empty match.
-            for key in ["file_path", "path", "command", "pattern",
-                        "description", "url", "query", "prompt"] {
-                if let v = obj[key] as? String, !v.isEmpty {
-                    return Self.truncate(v, to: 100)
-                }
-            }
-        }
-        return Self.truncate(raw, to: 100)
+        ToolInputSummary.summarise(event.input)
     }
 
     private func resultPreview() -> String {
@@ -179,19 +164,19 @@ struct ToolEventRow: View {
 
     private var icon: String { Self.iconFor(event.name) }
 
-    private var prefixColor: Color {
+    private var prefixRole: Palette.Role {
         switch event.status {
-        case .running, .pending: return .yellow
-        case .ok:                return .green
-        case .errored, .denied:  return .red
+        case .running, .pending: return .accent
+        case .ok:                return .ok
+        case .errored, .denied:  return .danger
         }
     }
 
-    private var statusColor: Color {
+    private var statusRole: Palette.Role {
         switch event.status {
-        case .running, .pending: return .yellow
-        case .ok:                return .green
-        case .errored, .denied:  return .red
+        case .running, .pending: return .accent
+        case .ok:                return .ok
+        case .errored, .denied:  return .danger
         }
     }
 

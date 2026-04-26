@@ -29,6 +29,7 @@ struct MessageListView: View {
     @Query(sort: \AssistantChunk.createdAt) var chunks: TableResults<AssistantChunk>
     @Query(sort: \ApprovalRequest.requestedAt) var approvals: TableResults<ApprovalRequest>
     @Query(sort: \AskQuestion.requestedAt) var askQuestions: TableResults<AskQuestion>
+    @Query(sort: \ToolEvent.startedAt) var toolEvents: TableResults<ToolEvent>
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,6 +46,8 @@ struct MessageListView: View {
                         pendingBallot: askPendingBallot,
                         isFocused: q.globalId == activeAskQuestionId,
                         selfMember: selfMember)
+                case .toolEvent(let t):
+                    ToolEventRow(event: t)
                 }
             }
         }
@@ -55,7 +58,14 @@ struct MessageListView: View {
         let chunkEvents = chunks.map { RoomEvent.chunk($0) }
         let approvalEvents = approvals.map { RoomEvent.approval($0) }
         let askEvents = visibleAskQuestions().map { RoomEvent.askQuestion($0) }
-        let merged = (chatEvents + chunkEvents + approvalEvents + askEvents)
+        // Skip empty-input pending tool events — those are momentary
+        // states between row-create and the input-write inside
+        // `ClaudeEventProcessor.openToolEvent` and would render as a
+        // bare `├─ 🔧` row for one frame.
+        let toolEventRows = toolEvents
+            .filter { !$0.name.isEmpty }
+            .map { RoomEvent.toolEvent($0) }
+        let merged = (chatEvents + chunkEvents + approvalEvents + askEvents + toolEventRows)
             .sorted { $0.timestamp < $1.timestamp }
         guard let floor = scrollbackFloor else { return merged }
         return merged.filter { $0.timestamp > floor }
@@ -92,6 +102,7 @@ enum RoomEvent: Identifiable {
     case chunk(AssistantChunk)
     case approval(ApprovalRequest)
     case askQuestion(AskQuestion)
+    case toolEvent(ToolEvent)
 
     var id: String {
         switch self {
@@ -99,6 +110,7 @@ enum RoomEvent: Identifiable {
         case .chunk(let c):       return "c-\(c.globalId?.uuidString ?? "?")"
         case .approval(let a):    return "a-\(a.globalId?.uuidString ?? "?")"
         case .askQuestion(let q): return "q-\(q.globalId?.uuidString ?? "?")"
+        case .toolEvent(let t):   return "t-\(t.globalId?.uuidString ?? "?")"
         }
     }
 
@@ -108,6 +120,7 @@ enum RoomEvent: Identifiable {
         case .chunk(let c):       return c.createdAt
         case .approval(let a):    return a.requestedAt
         case .askQuestion(let q): return q.requestedAt
+        case .toolEvent(let t):   return t.startedAt
         }
     }
 }
@@ -134,6 +147,10 @@ struct MessageRow: View {
             // Same fallback rationale as .approval — AskQuestion rows
             // are routed to AskQuestionCardView in the parent.
             Text("[question card]").foregroundColor(.dim)
+        case .toolEvent:
+            // Routed to ToolEventRow in the parent; this branch only
+            // fires if the parent forgot to special-case the enum.
+            Text("[tool event]").foregroundColor(.dim)
         }
     }
 
@@ -272,8 +289,10 @@ private struct IndexedSegment: Identifiable {
 
 /// Renders a single non-text BodySegment (code or diff) as its
 /// dedicated view. Text segments handled directly by `MessageRow`
-/// to keep the header-line fast path.
-private struct SegmentView: View {
+/// to keep the header-line fast path. File-internal access (no
+/// `private`) so `ToolEventRow` can reuse the same renderer for
+/// sub-agent (Task) result bodies.
+struct SegmentView: View {
     let segment: BodySegment
 
     @ViewBuilder var body: some View {

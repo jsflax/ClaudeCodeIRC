@@ -882,6 +882,9 @@ struct RoomPane: View {
     /// fire `.task(id:)` whenever any chat-stream row inserts.
     @Query(sort: \ChatMessage.createdAt) var messages: TableResults<ChatMessage>
     @Query(sort: \AssistantChunk.createdAt) var chunks: TableResults<AssistantChunk>
+    @Query(sort: \ToolEvent.startedAt) var paneToolEvents: TableResults<ToolEvent>
+    @Query(sort: \ApprovalRequest.requestedAt) var paneApprovals: TableResults<ApprovalRequest>
+    @Query(sort: \AskQuestion.requestedAt) var paneAskQuestions: TableResults<AskQuestion>
 
     /// ScrollView offset state. Initialised to `Int.max`; the
     /// ScrollView's `afterChildren` clamps to `contentH - viewportH`
@@ -893,24 +896,43 @@ struct RoomPane: View {
         turns.first { $0.status == .streaming }
     }
 
+    /// True when claude is blocked waiting on a room decision —
+    /// pending approval or pending question. While true, the
+    /// thinking spinner reads as "doodling" but claude isn't
+    /// actually thinking; the subprocess is parked inside the MCP
+    /// shim's awaitDecision loop. Hide the spinner so the UI
+    /// doesn't lie about activity.
+    private var hasPendingDecision: Bool {
+        paneApprovals.contains { $0.status == .pending }
+            || paneAskQuestions.contains { $0.status == .pending }
+    }
+
+    /// Whether to show the thinking strip below the scrollback.
+    private var showThinkingView: Bool {
+        streamingTurn != nil && !hasPendingDecision
+    }
+
     /// ScrollView reserves the pane's full height minus the title
-    /// strip (1) and, when claude is streaming, the thinking strip
-    /// (1). Without shrinking here, the ScrollView eats the pane and
-    /// the ClaudeThinkingView gets 0 rows → invisible.
+    /// strip (1) and, when claude is streaming AND no decision is
+    /// pending, the thinking strip (1). Without shrinking here, the
+    /// ScrollView eats the pane and the ClaudeThinkingView gets 0
+    /// rows → invisible.
     private var scrollHeight: Int {
         let paneHeight = Term.rows - 6 // chrome: topbar+hline+status+input+hotkey+pad
-        let thinking = streamingTurn != nil ? 1 : 0
+        let thinking = showThinkingView ? 1 : 0
         return max(1, paneHeight - 1 /* title strip */ - thinking)
     }
 
-    /// Sum of inserted chat-stream rows. Bumps on every new
-    /// ChatMessage / AssistantChunk insert, drives the auto-scroll
-    /// `.task(id:)`. Tied to two tables (not all RoomEvent sources)
-    /// because cards (Approval / AskQuestion) are visually
-    /// secondary; if we miss pinning on a card insert, the next
-    /// chat row re-pins. Cheap to add the others if needed.
+    /// Sum of inserted rows that should drive auto-scroll-to-bottom.
+    /// Includes every row type that lands visibly in the scrollback:
+    /// chat messages, streaming chunks, tool events, approvals, and
+    /// question cards. Bumping any of these pins the view.
     private var totalEventCount: Int {
-        messages.count + chunks.count
+        messages.count
+            + chunks.count
+            + paneToolEvents.count
+            + paneApprovals.count
+            + paneAskQuestions.count
     }
 
     var body: some View {
@@ -925,7 +947,7 @@ struct RoomPane: View {
                     askFocusedRow: askFocusedRow,
                     askPendingBallot: askPendingBallot)
             }
-            // Auto-pin to bottom whenever a new chat-stream row
+            // Auto-pin to bottom whenever a new scrollback row
             // inserts. ScrollView's afterChildren clamps `Int.max`
             // to the real maxOffset, so we don't need to know the
             // viewport / content sizes here. Trade-off: if the user
@@ -935,7 +957,7 @@ struct RoomPane: View {
             .task(id: totalEventCount) {
                 scrollOffset = .max
             }
-            if let t = streamingTurn {
+            if showThinkingView, let t = streamingTurn {
                 ClaudeThinkingView(turnId: t.globalId)
             }
         }

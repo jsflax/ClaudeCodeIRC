@@ -61,7 +61,7 @@ struct AskQuestionCardView: View {
     @ViewBuilder
     private var contentBody: some View {
         VStack(spacing: 0) {
-            questionLines
+            questionBody
             SpacerView(1)
             ForEach(Array(question.options.indices)) { idx in
                 optionRow(idx: idx, option: question.options[idx])
@@ -70,18 +70,91 @@ struct AskQuestionCardView: View {
         }
     }
 
-    /// Each line of the (possibly multi-paragraph) question header
-    /// rendered through `Text(markdown:)` so `**bold**`, backtick code,
-    /// and `# heading` style cleanly. Pre-split on `\n` so embedded
-    /// newlines don't fall through to NCursesUI's wrap path
-    /// (which can drop the `│` left frame on continuation rows).
+    /// The question header — typically just one line for AskUserQuestion
+    /// but multi-paragraph markdown for ExitPlanMode plans. Pipe through
+    /// `MessageBodyParser` so fenced code blocks and unified diffs render
+    /// in their own framed views; reflow `.text` segments paragraph-wise
+    /// so soft-wrapped prose collapses to space (lets NCursesUI wrap
+    /// against terminal width) while preserving headings, list items,
+    /// and blockquotes as standalone rows.
     @ViewBuilder
-    private var questionLines: some View {
-        let lines = question.header.split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-        ForEach(Array(lines.indices)) { idx in
-            Text(markdown: lines[idx])
+    private var questionBody: some View {
+        let segments = MessageBodyParser.segments(question.header)
+        ForEach(Array(segments.enumerated())
+            .map { IndexedQuestionSegment(index: $0.offset, segment: $0.element) }
+        ) { entry in
+            switch entry.segment {
+            case .text(let s):
+                paragraphFlow(s)
+            case .code(let lang, let filename, let body):
+                CodeBlockView(lang: lang, filename: filename, source: body)
+            case .diff(let file, let patch):
+                DiffBlockView(file: file, patch: patch)
+            }
         }
+    }
+
+    /// Render a `.text` segment as a sequence of paragraph rows.
+    /// Each paragraph collapses internal soft-wrap newlines to spaces
+    /// so NCursesUI's word-wrap can reflow against the actual card
+    /// width; standalone lines (headings, lists, blockquotes) stay
+    /// as their own rows.
+    @ViewBuilder
+    private func paragraphFlow(_ text: String) -> some View {
+        let paragraphs = Self.reflowParagraphs(text)
+        ForEach(Array(paragraphs.enumerated())
+            .map { IndexedParagraph(index: $0.offset, line: $0.element) }
+        ) { entry in
+            Text(markdown: entry.line)
+        }
+    }
+
+    /// Group consecutive lines into "paragraphs" — soft-wrapped prose
+    /// merges into one long string (NCursesUI re-wraps to width),
+    /// while lines that are semantically standalone (empty, headings,
+    /// list items, blockquotes) stay separate.
+    static func reflowParagraphs(_ text: String) -> [String] {
+        let lines = text.components(separatedBy: "\n")
+        var out: [String] = []
+        var buf: [String] = []
+
+        func flush() {
+            guard !buf.isEmpty else { return }
+            out.append(buf.joined(separator: " "))
+            buf.removeAll(keepingCapacity: true)
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                flush()
+                out.append("") // preserve blank line as paragraph break
+                continue
+            }
+            if isStandaloneLine(trimmed) {
+                flush()
+                out.append(line)
+                continue
+            }
+            buf.append(line)
+        }
+        flush()
+        return out
+    }
+
+    /// Lines that should NOT merge into a wrapped paragraph — block-level
+    /// markdown that has its own visual identity. Headings (`# `..`#### `),
+    /// bullet lists (`- `, `* `, `+ `), numbered lists (`1. `), and
+    /// blockquotes (`> `).
+    private static func isStandaloneLine(_ line: String) -> Bool {
+        if line.hasPrefix("# ") || line.hasPrefix("## ")
+            || line.hasPrefix("### ") || line.hasPrefix("#### ") { return true }
+        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
+            return true
+        }
+        if line.hasPrefix("> ") { return true }
+        // Numbered list: optional whitespace + digits + dot + space.
+        return line.firstMatch(of: #/^\s*\d+\. /#) != nil
     }
 
     // MARK: - Option rows
@@ -217,4 +290,20 @@ struct AskQuestionCardView: View {
     private var accentRole: Palette.Role {
         question.status == .pending ? .accent : .mute
     }
+}
+
+/// Identifiable wrapper for ForEach over `[BodySegment]` (segments
+/// have no natural id). Mirrors `IndexedSegment` in `MessageListView`
+/// — kept private here so the two views stay decoupled.
+private struct IndexedQuestionSegment: Identifiable {
+    let index: Int
+    let segment: BodySegment
+    var id: Int { index }
+}
+
+/// Identifiable wrapper for paragraph-flow lines.
+private struct IndexedParagraph: Identifiable {
+    let index: Int
+    let line: String
+    var id: Int { index }
 }

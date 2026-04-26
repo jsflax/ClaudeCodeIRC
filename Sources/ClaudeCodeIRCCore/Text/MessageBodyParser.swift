@@ -22,12 +22,14 @@ public enum BodySegment: Equatable, Sendable {
 public enum MessageBodyParser {
 
     public static func segments(_ text: String) -> [BodySegment] {
-        // ```lang [optional filename]
+        // ```[lang [filename]]
         // …body…
         // ```
         //
         // Captures:
-        //   1 — language slug (`swift`, `ts`, `diff`, …)
+        //   1 — optional language slug (`swift`, `ts`, `diff`, …) —
+        //       claude often emits bare ``` for grammars / generic
+        //       blocks; treat the missing case as plain "code".
         //   2 — optional trailing filename (`auth/backup_codes.ts`)
         //   3 — body between the fences
         //
@@ -35,7 +37,7 @@ public enum MessageBodyParser {
         // `Regex` isn't `Sendable`, so it can't live as a module-
         // scope `static let` under strict concurrency — build per
         // call. The cost is negligible.
-        let fencedCode = #/```([A-Za-z0-9_+\-]+)(?:[ \t]+([\w./+\-]+))?\n(.*?)\n```/#
+        let fencedCode = #/```([A-Za-z0-9_+\-]*)(?:[ \t]+([\w./+\-]+))?\n(.*?)\n```/#
             .dotMatchesNewlines()
 
         var out: [BodySegment] = []

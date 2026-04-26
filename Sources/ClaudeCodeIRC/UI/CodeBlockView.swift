@@ -1,13 +1,15 @@
 import ClaudeCodeIRCCore
 import NCursesUI
 
-/// Framed code block with a filename / language badge up top, a
-/// line-number gutter on the left, and tokenized source. Ported
-/// visual from `tui-core.jsx`'s `CodeBlock`.
+/// Framed code block — wraps the line-numbered, syntax-highlighted
+/// source in NCursesUI's `CardView` primitive. The reverse-video
+/// header chip carries the filename or language; line numbers go in
+/// a 5-col gutter inside the card body.
 ///
-/// Box characters are fixed to single-line right now; once the
-/// palette adds per-role Text coloring (D10) we'll swap these for
-/// the user's box-drawing preference.
+/// Width is dynamic — CardView claims the layout pass's allocated
+/// rect, so the block reflows with terminal resize. Empty-language
+/// fences (bare ` ``` `) get a "code" fallback chip so the frame
+/// still has a header.
 struct CodeBlockView: View {
     let lang: String
     let filename: String?
@@ -15,67 +17,73 @@ struct CodeBlockView: View {
 
     var body: some View {
         let lines = source.components(separatedBy: "\n")
-        return VStack(spacing: 0) {
-            header
-            ForEach(Array(lines.indices)) { idx in
-                CodeLine(
-                    lineNumber: idx + 1,
-                    source: lines[idx],
-                    lang: lang)
-            }
-            footer
-        }
+        return CardView(
+            title: Text(headerLabel),
+            trailing: trailingLang,
+            accent: .mute,
+            content: {
+                ForEach(Array(lines.indices)) { idx in
+                    CodeLine(
+                        lineNumber: idx + 1,
+                        source: lines[idx],
+                        lang: lang)
+                }
+            })
     }
 
-    private var header: Text {
-        var line = Text("┌─── ").foregroundColor(.dim)
-        line = line + Text(filename ?? lang).foregroundColor(.yellow)
-        line = line + Text(" ").foregroundColor(.dim)
-        let rule = String(repeating: "─", count: max(1, 60 - (filename ?? lang).count))
-        line = line + Text(rule).foregroundColor(.dim)
-        line = line + Text("┐").foregroundColor(.dim)
-        return line
+    /// Chip header text. Prefers a non-empty filename, then a
+    /// non-empty lang, else "code". Empty lang occurs for bare
+    /// ` ``` ` fences (markdown without a language slug) — claude
+    /// emits these for ad-hoc grammars / output blocks.
+    private var headerLabel: String {
+        if let f = filename, !f.isEmpty { return f }
+        if !lang.isEmpty { return lang }
+        return "code"
     }
 
-    private var footer: Text {
-        Text("└────────────────────────────────────────────────────────────┘")
-            .foregroundColor(.dim)
+    /// When both filename + lang are present, surface the lang as
+    /// the trailing annotation so the chip stays focused on the
+    /// filename. Returns nil when there's nothing to display so
+    /// CardView skips the trailing slot.
+    private var trailingLang: Text? {
+        guard let f = filename, !f.isEmpty, !lang.isEmpty else { return nil }
+        return Text(lang).paletteColor(.dim)
     }
 }
 
-/// One line inside a code block: gutter `│`, padded line number,
-/// then the tokenized source. The highlighter emits a flat token
-/// stream; we render each token as a foreground-colored Text run
-/// and concat with `+`.
+/// One line inside a code block: a 5-col line-number gutter then the
+/// tokenized source. CardView owns the outer `│ … │` borders so this
+/// row only needs to render content — no left-frame `│` needed.
 struct CodeLine: View {
     let lineNumber: Int
     let source: String
     let lang: String
 
     var body: some View {
-        var line = Text("│ ").foregroundColor(.dim)
-        line = line + Text(String(format: "%3d", lineNumber)).foregroundColor(.dim)
-        line = line + Text("  ").foregroundColor(.dim)
+        var line = Text(String(format: "%3d  ", lineNumber)).paletteColor(.dim)
         for token in SyntaxHighlighter.tokenize(source, language: lang) {
-            line = line + Text(token.text).foregroundColor(colorFor(token.kind))
+            line = line + Text(token.text).paletteColor(roleFor(token.kind))
         }
         return line
     }
 
-    /// Map token class → legacy `Color` enum cell. When the palette
-    /// role-aware Text API lands in D10 this becomes palette-driven.
-    private func colorFor(_ kind: TokenKind) -> Color {
+    /// Map token kind → palette role so syntax colours track the
+    /// active palette. The four `code*` roles in the palette
+    /// registry are tuned per palette (phosphor / amber / modern /
+    /// claude); diff-row colours reuse the generic `ok` / `danger` /
+    /// `accent2` slots since they're not language-specific.
+    private func roleFor(_ kind: TokenKind) -> Palette.Role {
         switch kind {
-        case .keyword:      return .yellow
-        case .string:       return .green
-        case .comment:      return .dim
-        case .number:       return .cyan
-        case .identifier:   return .white
-        case .punctuation:  return .dim
-        case .whitespace:   return .white
-        case .diffAdd:      return .green
-        case .diffRemove:   return .red
-        case .diffHunk:     return .cyan
+        case .keyword:      return .codeKw
+        case .string:       return .codeStr
+        case .comment:      return .codeCom
+        case .number:       return .codeNum
+        case .identifier:   return .codeIdent
+        case .punctuation:  return .codePunct
+        case .whitespace:   return .codeIdent
+        case .diffAdd:      return .ok
+        case .diffRemove:   return .danger
+        case .diffHunk:     return .accent2
         case .diffMeta:     return .dim
         }
     }

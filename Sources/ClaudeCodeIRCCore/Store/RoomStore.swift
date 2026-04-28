@@ -24,7 +24,6 @@ public enum RoomStore {
         ApprovalVote.self,
         AskQuestion.self,
         AskVote.self,
-        HostHandoff.self,
     ]
 
     /// Open (or create) the host-side authoritative room DB on disk.
@@ -53,7 +52,7 @@ public enum RoomStore {
         return try Lattice(
             for: schema,
             configuration: .init(
-                fileURL: RoomPaths.peerStoreURL(forCode: code),
+                fileURL: RoomPaths.storeURL(forCode: code),
                 authorizationToken: joinCode ?? openRoomBearer,
                 wssEndpoint: endpoint))
     }

@@ -95,14 +95,4 @@ private func makeTempLattice() throws -> Lattice {
         #expect(approval.toolEvent?.name == "Bash")
     }
 
-    @Test func hostHandoffDefaultsReasonable() throws {
-        let lattice = try makeTempLattice()
-
-        let handoff = HostHandoff()
-        lattice.add(handoff)
-
-        #expect(handoff.status == .offered)
-        #expect(handoff.reason == .graceful)
-        #expect(handoff.newEndpoint == nil)
-    }
 }

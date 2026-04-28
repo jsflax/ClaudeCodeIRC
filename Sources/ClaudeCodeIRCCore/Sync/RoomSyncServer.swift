@@ -32,6 +32,12 @@ public actor RoomSyncServer {
     private var channel: Channel?
     private var peers: [ObjectIdentifier: Channel] = [:]
     private var relayTask: Task<Void, Never>?
+    /// `stop()` may be invoked more than once (e.g. by tests calling
+    /// it explicitly and a deinit-style teardown calling it again).
+    /// Both `Channel.close()` and `EventLoopGroup.shutdownGracefully()`
+    /// hang on a duplicate call rather than returning quickly, so we
+    /// gate the body on this flag.
+    private var stopped: Bool = false
 
     /// - Parameter latticeReference: a `sendableReference` taken from a
     ///   caller-side `Lattice` handle. Resolving it here re-opens the
@@ -93,10 +99,39 @@ public actor RoomSyncServer {
         return port
     }
 
+    /// Idempotent. Calling `stop()` twice is a no-op the second time —
+    /// both `Channel.close()` and `EventLoopGroup.shutdownGracefully()`
+    /// hang on a duplicate call rather than returning quickly. The
+    /// `stopped` flag short-circuits the duplicate cleanly.
+    ///
+    /// **Drain order matters.** The relay task does
+    ///
+    ///     for await refs in lattice.changeStream {
+    ///         await broadcastEntries(refs)   // schedules writes on
+    ///                                        // the NIO event loop
+    ///     }
+    ///
+    /// `cancel()` only takes effect at the next suspension point. If
+    /// the task is mid-`broadcastEntries`, it's already queueing work
+    /// onto channels owned by `group`. Shutting `group` down while
+    /// those writes are in flight produces "Cannot schedule tasks on
+    /// an EventLoop that has already shut down" — which surfaces as
+    /// a SIGSEGV / SIGBUS in parallel test runs that stand up multiple
+    /// servers concurrently.
+    ///
+    /// We therefore `await task.value` after cancellation so the relay
+    /// has fully exited (and any pending channel writes have either
+    /// completed or been dropped on close) before we tear down the
+    /// channel and group.
     public func stop() async throws {
-        relayTask?.cancel()
+        guard !stopped else { return }
+        stopped = true
+        let task = relayTask
         relayTask = nil
+        task?.cancel()
+        await task?.value
         try await channel?.close().get()
+        channel = nil
         try await group.shutdownGracefully()
     }
 

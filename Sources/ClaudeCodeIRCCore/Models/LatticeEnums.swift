@@ -74,12 +74,19 @@ public enum PermissionMode: String, Codable, Sendable {
     }
 }
 
+/// How a hosted room is announced to the world.
+///
+/// - `private` — LAN-only via Bonjour, plus invite-only over the internet
+///   when the host has a public tunnel URL. Not listed in the directory.
+/// - `public` — listed in the directory under the well-known "public"
+///   bucket. Anyone can browse; entry still requires the join code.
+/// - `group` — listed in the directory under an opaque `groupHashHex`
+///   bucket (= base64url(sha256(groupSecret))). Only members holding the
+///   group secret can compute the same hash and see the listing. Entry
+///   still requires the per-room join code (independent of the group
+///   secret). Pair with `Session.groupHashHex` on the same row.
 @LatticeEnum
-public enum HandoffStatus: String, Codable, Sendable {
-    case offered, accepted, declined, completed
+public enum SessionVisibility: String, Codable, Sendable {
+    case `private`, `public`, group
 }
 
-@LatticeEnum
-public enum HandoffReason: String, Codable, Sendable {
-    case graceful, detected
-}

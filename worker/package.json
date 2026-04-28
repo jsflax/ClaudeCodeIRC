@@ -1,0 +1,16 @@
+{
+  "name": "ccirc-lobby",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Public room directory Worker for ClaudeCodeIRC",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.4.0",
+    "wrangler": "^3.99.0"
+  }
+}

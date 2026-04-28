@@ -1,0 +1,10 @@
+name = "ccirc-lobby"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# KV namespace for the room directory. Created via:
+#   wrangler kv:namespace create LOBBY
+# and the printed `id` pasted below.
+[[kv_namespaces]]
+binding = "LOBBY"
+id = "0e027d50a2dc4865b74ae8dbe4890cf1"

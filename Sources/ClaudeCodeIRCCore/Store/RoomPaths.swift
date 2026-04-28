@@ -49,16 +49,14 @@ public enum RoomPaths {
         dataDirectory.appending(path: "prefs.lattice")
     }
 
+    /// Room DB path. Same file for host and peer roles — the role is a
+    /// runtime property of the `Lattice` (host owns the synchronizer;
+    /// peer connects over WS), not a property of the file. Multiple
+    /// instances on one machine isolate via `CCIRC_DATA_DIR` (or the
+    /// `--data-dir` CLI flag), so different roles using the same room
+    /// code never share a directory.
     public static func storeURL(forCode code: String) -> URL {
         rootDirectory.appending(path: "\(code).lattice")
-    }
-
-    /// Peer-side room file. Scoped by pid so two instances running on
-    /// the same machine (host + peer, or two peers) don't share the
-    /// same SQLite file — the peer is supposed to be a replica that
-    /// syncs *over the wire*, not a second handle on the host's file.
-    public static func peerStoreURL(forCode code: String, pid: pid_t = getpid()) -> URL {
-        rootDirectory.appending(path: "\(code).peer-\(pid).lattice")
     }
 
     /// Create the rooms directory if it doesn't exist. Idempotent.

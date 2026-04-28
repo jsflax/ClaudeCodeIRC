@@ -62,7 +62,7 @@ struct ClaudeCodeIRCApp: App {
         // barfs with "no such table" on the first observe/fetch.
         // Register the full schema on the default in-memory placeholder.
         LatticeKey.defaultValue = try! Lattice(
-            for: RoomStore.schema + [AppPreferences.self],
+            for: RoomStore.schema + [AppPreferences.self, LocalGroup.self],
             configuration: .init(isStoredInMemoryOnly: true))
         Log.line("app", "LatticeKey.defaultValue seeded with full schema")
     }

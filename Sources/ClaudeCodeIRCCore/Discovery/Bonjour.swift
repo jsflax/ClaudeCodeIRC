@@ -82,11 +82,41 @@ public struct DiscoveredRoom: Identifiable, Hashable, Sendable {
     /// lobby prompts for a code rather than silently joining).
     public let requiresJoinCode: Bool
 
+    /// Set when this room was sourced from the directory Worker
+    /// rather than Bonjour. Carries the full `wss://*.trycloudflare.com/room/<code>`
+    /// URL — `hostname/port` are unusable for tunnel-routed rooms
+    /// (the host is not directly addressable on the LAN). When nil,
+    /// `wsURL` falls back to the Bonjour-style construction below.
+    public let wssURLOverride: URL?
+
+    public init(
+        id: String,
+        name: String,
+        roomCode: String,
+        hostNick: String,
+        cwd: String,
+        hostname: String,
+        port: Int,
+        requiresJoinCode: Bool,
+        wssURLOverride: URL? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.roomCode = roomCode
+        self.hostNick = hostNick
+        self.cwd = cwd
+        self.hostname = hostname
+        self.port = port
+        self.requiresJoinCode = requiresJoinCode
+        self.wssURLOverride = wssURLOverride
+    }
+
     /// WS URL to pass into `Lattice.Configuration.wssEndpoint`. The
     /// `last-event-id` query param is appended by the Lattice sync
     /// client itself; we just provide the base URL.
     public var wsURL: URL {
-        URL(string: "ws://\(hostname):\(port)/room/\(roomCode)")!
+        if let override = wssURLOverride { return override }
+        return URL(string: "ws://\(hostname):\(port)/room/\(roomCode)")!
     }
 }
 

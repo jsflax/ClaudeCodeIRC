@@ -19,6 +19,7 @@ struct WorkspaceView: View {
     @State private var draft: String = ""
     @State private var hostFormVisible: Bool = false
     @State private var joinFormVisible: Bool = false
+    @State private var addGroupVisible: Bool = false
     @State private var pendingJoin: DiscoveredRoom?
     @State private var paletteSelectorVisible: Bool = false
     /// Highlighted slash-popup row — driven by ↑/↓, used by Tab / Enter
@@ -214,6 +215,11 @@ struct WorkspaceView: View {
                 room: pendingJoin,
                 isPresented: $joinFormVisible)
         }
+        .overlay(isPresented: $addGroupVisible, dimsBackground: true) {
+            AddGroupOverlay(
+                model: model,
+                isPresented: $addGroupVisible)
+        }
         .overlay(isPresented: $paletteSelectorVisible, dimsBackground: true) {
             PaletteSelectorOverlay(
                 prefs: model.prefs,
@@ -269,6 +275,17 @@ struct WorkspaceView: View {
         } else if room.isHost {
             line = line + Text(" [open]").foregroundColor(.dim)
         }
+        // Tunnel state: only meaningful for non-private rooms. `pending`
+        // = host picked public/group but cloudflared hasn't surfaced a
+        // URL yet; `ready` = URL assigned and synced to peers via
+        // Session.publicURL.
+        if let session = room.session, session.visibility != .private {
+            if session.publicURL != nil {
+                line = line + Text(" [public:ready]").foregroundColor(.green)
+            } else {
+                line = line + Text(" [public:pending]").foregroundColor(.yellow)
+            }
+        }
         if mode != .default {
             line = line + Text(" [\(mode.label)]").foregroundColor(Self.modeColor(mode))
         }
@@ -320,7 +337,7 @@ struct WorkspaceView: View {
     /// keypresses — same rule as the focus binding's "card route"
     /// branch (pending question + empty draft + no overlay open).
     private var askCardActive: Bool {
-        guard !hostFormVisible, !joinFormVisible, !askOtherVisible else {
+        guard !hostFormVisible, !joinFormVisible, !addGroupVisible, !askOtherVisible else {
             return false
         }
         guard pendingAskQuestion != nil, draft.isEmpty else { return false }
@@ -342,7 +359,7 @@ struct WorkspaceView: View {
         //       own TextField focus.
         Binding(
             get: {
-                if hostFormVisible || joinFormVisible { return false }
+                if hostFormVisible || joinFormVisible || addGroupVisible { return false }
                 if askOtherVisible { return false }
                 if pendingApproval != nil && draft.isEmpty { return false }
                 if pendingAskQuestion != nil && draft.isEmpty { return false }
@@ -449,6 +466,12 @@ struct WorkspaceView: View {
         case .join(let filter):
             joinDiscovered(nameFilter: filter, room: model.activeRoom)
             return
+        case .reopen(let filter):
+            reopenRecent(nameFilter: filter, room: model.activeRoom)
+            return
+        case .addGroup:
+            addGroupVisible = true
+            return
         case .palette:
             paletteSelectorVisible = true
             return
@@ -478,7 +501,7 @@ struct WorkspaceView: View {
         if let me = room.selfMember, me.isAway {
             switch intent {
             case .afk: break // explicit toggle — handled below
-            case .empty, .unknown, .leave, .clear, .palette, .host, .join: break
+            case .empty, .unknown, .leave, .clear, .palette, .host, .join, .reopen, .addGroup: break
             default:
                 me.isAway = false
                 me.awayReason = nil
@@ -487,7 +510,7 @@ struct WorkspaceView: View {
         }
 
         switch intent {
-        case .empty, .host, .join, .palette, .setNick:
+        case .empty, .host, .join, .reopen, .addGroup, .palette, .setNick:
             // Handled above — listed here only for the exhaustive
             // switch; shouldn't reach this branch.
             return
@@ -540,6 +563,10 @@ struct WorkspaceView: View {
             hostFormVisible = true
         case .join(let filter):
             joinDiscovered(nameFilter: filter, room: room)
+        case .reopen(let filter):
+            reopenRecent(nameFilter: filter, room: room)
+        case .addGroup:
+            addGroupVisible = true
         case .unknown(let reason):
             insertSystem(room: room, "error: \(reason)")
         }
@@ -557,19 +584,26 @@ struct WorkspaceView: View {
     /// render a system ChatMessage.
     private func joinDiscovered(nameFilter: String?, room currentRoom: RoomInstance?) {
         let joined = Set(model.joinedRooms.map(\.roomCode))
-        let unjoined = model.browser.rooms.filter { !joined.contains($0.roomCode) }
-        guard !unjoined.isEmpty else {
-            feedback("no discovered rooms to join", room: currentRoom)
-            return
-        }
+        let filter = nameFilter?.lowercased()
+
+        // Bonjour rooms + directory rooms unioned into one list. Both
+        // produce `DiscoveredRoom`s; directory rooms carry an explicit
+        // `wssURLOverride` (the cloudflared tunnel URL), Bonjour rooms
+        // compute `wsURL` from `hostname:port`. Either way the join
+        // overlay + `model.join` chain is the same.
+        let candidates = (model.browser.rooms + directoryAsDiscoveredRooms())
+            .filter { !joined.contains($0.roomCode) }
+
         let target: DiscoveredRoom?
-        if let filter = nameFilter?.lowercased() {
-            target = unjoined.first { $0.name.lowercased().hasPrefix(filter) }
+        if let filter, !filter.isEmpty {
+            target = candidates.first { $0.name.lowercased().hasPrefix(filter) }
         } else {
-            target = unjoined.first
+            target = candidates.first
         }
         guard let target else {
-            feedback("no room matches '\(nameFilter ?? "")'", room: currentRoom)
+            feedback(
+                nameFilter.map { "no room matches '\($0)'" } ?? "no discovered rooms to join",
+                room: currentRoom)
             return
         }
         pendingJoin = target
@@ -578,6 +612,82 @@ struct WorkspaceView: View {
         } else {
             do { _ = try model.join(target, joinCode: nil) }
             catch { feedback("join failed: \(error)", room: currentRoom) }
+        }
+    }
+
+    /// Translate `model.directoryRoomsByGroup` snapshots into
+    /// `DiscoveredRoom` view models so they merge with Bonjour finds
+    /// in `/join`. Same room appearing in multiple group buckets is
+    /// deduped by `roomCode`.
+    private func directoryAsDiscoveredRooms() -> [DiscoveredRoom] {
+        var seen: Set<String> = []
+        var out: [DiscoveredRoom] = []
+        for room in model.directoryRoomsByGroup.values.flatMap({ $0 }) {
+            guard !seen.contains(room.roomId),
+                  let url = URL(string: room.wssURL) else { continue }
+            seen.insert(room.roomId)
+            out.append(DiscoveredRoom(
+                id: room.roomId,
+                name: room.name,
+                roomCode: room.roomId,
+                hostNick: room.hostHandle,
+                cwd: "",
+                hostname: url.host ?? "",
+                port: url.port ?? 443,
+                requiresJoinCode: true,
+                wssURLOverride: url))
+        }
+        return out
+    }
+
+    /// Resolve `/reopen [name]` against `model.recentLattices`. Reads
+    /// the persisted `Session` row from the matching Lattice to decide
+    /// whether to reopen as host (this user's nick == `Session.host?.nick`)
+    /// or peer (otherwise). Peer reopen requires a non-nil
+    /// `Session.publicURL` — without it we can't construct a wssEndpoint
+    /// (Bonjour rediscovery via the lobby is the alternative path).
+    private func reopenRecent(nameFilter: String?, room currentRoom: RoomInstance?) {
+        guard !model.recentLattices.isEmpty else {
+            feedback("no recent rooms on disk", room: currentRoom)
+            return
+        }
+        let filterLower = nameFilter?.lowercased()
+
+        // Helper: pull the Session out of an entry.
+        func session(for entry: (code: String, lattice: Lattice)) -> Session? {
+            entry.lattice.objects(Session.self).first(where: { $0.code == entry.code })
+        }
+
+        let target = model.recentLattices.first { entry in
+            guard let s = session(for: entry) else { return false }
+            guard let f = filterLower, !f.isEmpty else { return true }
+            return s.name.lowercased().hasPrefix(f) || s.code.lowercased().hasPrefix(f)
+        }
+        guard let target, let s = session(for: target) else {
+            feedback("no recent room matches '\(nameFilter ?? "")'", room: currentRoom)
+            return
+        }
+
+        let isHostRoom = (s.host?.nick == model.prefs.nick)
+        if isHostRoom {
+            Task {
+                do { _ = try await model.reopenAsHost(code: target.code) }
+                catch { feedback("reopen as host failed: \(error)", room: currentRoom) }
+            }
+        } else {
+            guard let urlStr = s.publicURL, let url = URL(string: urlStr) else {
+                feedback("can't reopen as peer: no cached endpoint (host may be offline; rejoin via lobby)",
+                         room: currentRoom)
+                return
+            }
+            do {
+                _ = try model.reopenAsPeer(
+                    code: target.code,
+                    wssEndpoint: url,
+                    joinCode: s.joinCode)
+            } catch {
+                feedback("reopen as peer failed: \(error)", room: currentRoom)
+            }
         }
     }
 
@@ -976,7 +1086,7 @@ struct RoomPane: View {
 
 // MARK: - Host form (re-parented from the old LobbyView)
 
-enum HostFormFocus { case name, cwd, auth }
+enum HostFormFocus { case name, cwd, auth, visibility }
 
 struct HostFormOverlay: View {
     let model: RoomsModel
@@ -986,7 +1096,19 @@ struct HostFormOverlay: View {
     @State private var focus: HostFormFocus = .name
     @State private var name: String = ""
     @State private var requireCode: Bool = true
+    /// Selected visibility choice. Index into `visibilityChoices`
+    /// (private + public + one entry per stored `LocalGroup`).
+    @State private var visibilityIndex: Int = 0
     @State private var error: String = ""
+
+    /// Available group rows from `prefs.lattice`. The cycler iterates
+    /// `[private, public] + groups` so the user can pick a group they
+    /// already pasted via `/addgroup`. Read once per body eval — fine
+    /// for a modal form that's open briefly.
+    private var groups: [LocalGroup] {
+        Array(model.prefsLattice.objects(LocalGroup.self)
+            .sortedBy(SortDescriptor(\.addedAt, order: .forward)))
+    }
 
     private var cwdBinding: Binding<String> {
         Binding(
@@ -1022,6 +1144,11 @@ struct HostFormOverlay: View {
                         .foregroundColor(focus == .auth ? .cyan : .white)
                         .reverse(focus == .auth)
                 }
+                HStack {
+                    Text("visibility: \(visibilityLabel)")
+                        .foregroundColor(focus == .visibility ? .cyan : .white)
+                        .reverse(focus == .visibility)
+                }
                 SpacerView(1)
                 Text("⇥ switch   space toggle   ↵ create   ⎋ cancel")
                     .foregroundColor(.dim)
@@ -1032,36 +1159,87 @@ struct HostFormOverlay: View {
         }
         .onKeyPress(9 /* Tab */) {
             focus = switch focus {
-            case .name: .cwd
-            case .cwd:  .auth
-            case .auth: .name
+            case .name:       .cwd
+            case .cwd:        .auth
+            case .auth:       .visibility
+            case .visibility: .name
             }
         }
         .onKeyPress(Int32(UInt8(ascii: " "))) {
-            if focus == .auth { requireCode.toggle() }
+            switch focus {
+            case .auth:       requireCode.toggle()
+            case .visibility: cycleVisibility()
+            default: break
+            }
         }
         .onKeyPress(Int32(UInt8(ascii: "\n"))) {
-            if focus == .auth { submit() }
+            if focus == .auth || focus == .visibility { submit() }
         }
         .onKeyPress(27 /* ESC */) {
             isPresented = false
         }
     }
 
+    /// `[private, public, ...groups]`. Cycling wraps. Group entries
+    /// resolve to `(visibility: .group, groupHashHex: <hash>)` at
+    /// submit time.
+    private var visibilityChoices: [VisibilityChoice] {
+        [.private_, .public_] + groups.map { .group($0) }
+    }
+
+    private var currentChoice: VisibilityChoice {
+        let choices = visibilityChoices
+        let i = max(0, min(visibilityIndex, choices.count - 1))
+        return choices[i]
+    }
+
+    private func cycleVisibility() {
+        let choices = visibilityChoices
+        guard !choices.isEmpty else { return }
+        visibilityIndex = (visibilityIndex + 1) % choices.count
+    }
+
+    private var visibilityLabel: String {
+        switch currentChoice {
+        case .private_:        return "private (LAN only)"
+        case .public_:         return "public (listed in directory)"
+        case .group(let g):    return "group: \(g.name)"
+        }
+    }
+
     private func submit() {
+        let choice = currentChoice
+        let visibility: SessionVisibility
+        let groupHashHex: String?
+        switch choice {
+        case .private_:        visibility = .private; groupHashHex = nil
+        case .public_:         visibility = .public;  groupHashHex = nil
+        case .group(let g):    visibility = .group;   groupHashHex = g.hashHex
+        }
         Task {
             do {
                 let room = try await model.host(
                     name: name.isEmpty ? "unnamed" : name,
                     cwd: model.prefs.lastCwd,
                     mode: .default,
-                    requireJoinCode: requireCode)
+                    requireJoinCode: requireCode,
+                    visibility: visibility,
+                    groupHashHex: groupHashHex)
                 onCreated(room)
             } catch {
                 self.error = "\(error)"
             }
         }
     }
+}
+
+/// Internal enum for `HostFormOverlay`'s visibility cycler. Cases
+/// are suffixed `_` because `private`/`public` are Swift keywords;
+/// using backticks across many sites was uglier.
+enum VisibilityChoice {
+    case private_
+    case public_
+    case group(LocalGroup)
 }
 
 /// Join form — single TextField for the bearer code.
@@ -1106,6 +1284,49 @@ struct JoinFormOverlay: View {
         guard let room else { return }
         do {
             _ = try model.join(room, joinCode: joinCode)
+            isPresented = false
+        } catch {
+            self.error = "\(error)"
+        }
+    }
+}
+
+/// "Add a group" form — paste a `ccirc-group:v1:` invite, persist the
+/// resulting `LocalGroup` row in `prefs.lattice`. Idempotent: pasting
+/// the same invite twice resolves to the same row (matched by hash).
+struct AddGroupOverlay: View {
+    let model: RoomsModel
+    @Binding var isPresented: Bool
+
+    @State private var invite: String = ""
+    @State private var error: String = ""
+
+    var body: some View {
+        BoxView("Add group", color: .cyan) {
+            VStack {
+                Text("Paste a group invite (ccirc-group:v1:…)").foregroundColor(.dim)
+                HStack {
+                    Text("invite: ").foregroundColor(.dim)
+                    TextField("ccirc-group:v1:…",
+                              text: $invite,
+                              isFocused: .constant(true),
+                              onSubmit: submit)
+                }
+                SpacerView(1)
+                Text("↵ add   ⎋ cancel").foregroundColor(.dim)
+                if !error.isEmpty {
+                    Text(error).foregroundColor(.red)
+                }
+            }
+        }
+        .onKeyPress(27 /* ESC */) {
+            isPresented = false
+        }
+    }
+
+    private func submit() {
+        do {
+            _ = try model.addGroup(invitePaste: invite)
             isPresented = false
         } catch {
             self.error = "\(error)"

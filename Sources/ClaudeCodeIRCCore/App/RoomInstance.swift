@@ -23,18 +23,47 @@ public final class RoomInstance: Identifiable {
     /// to address a specific joined room. Not the sync code.
     public let id: UUID = UUID()
 
-    public let lattice: Lattice
+    /// Mutable so a peer can `swap()` to a new wss endpoint when the
+    /// host's `cloudflared` URL changes (tunnel restart). The on-disk
+    /// SQLite file stays at the same path, so per-synchronizer state
+    /// (`_lattice_sync_state`) survives close+reopen and the new
+    /// connection resumes via `?last-event-id=` deltas.
+    public private(set) var lattice: Lattice
     public let roomCode: String
     /// `nil` for an open room; the bearer code otherwise. Host displays
-    /// it so they can share it out-of-band.
-    public let joinCode: String?
+    /// it so they can share it out-of-band. Mutable for the swap path
+    /// in case the host rotates the join code on a tunnel-URL change.
+    public private(set) var joinCode: String?
     public let isHost: Bool
+
+    /// Peer-only. `true` when this peer joined through the host's
+    /// tunnel URL (a `wss://*.trycloudflare.com/...` endpoint coming
+    /// from the directory or a paste-link), `false` when it joined
+    /// directly over LAN via Bonjour (`ws://host.local:port/...`).
+    /// `PublicURLObserver` consults this to decide whether to react
+    /// to `Session.publicURL` changes — only tunnel peers need to
+    /// follow tunnel-URL rotations; LAN peers stay on their direct
+    /// connection. Always `false` on the host.
+    public let joinedViaTunnel: Bool
 
     public private(set) var session: Session?
     public private(set) var selfMember: Member?
 
     public let server: RoomSyncServer?
     public let publisher: BonjourPublisher?
+    /// Host-only, non-private rooms only. Spawns `cloudflared`, surfaces
+    /// `https://*.trycloudflare.com` URLs via `urlChanges`. Bridge task
+    /// (`tunnelTask`) propagates URL changes onto `Session.publicURL`,
+    /// which peers observe and use to swap their WS endpoint.
+    public let tunnelManager: TunnelManager?
+
+    /// Host-only, non-private rooms only. Heartbeats `POST /publish`
+    /// to the directory Worker every 30s while the room is up. Started
+    /// after construction; stopped in `leave()`. The publisher's
+    /// internals skip cycles until `Session.publicURL` is non-nil, so
+    /// it's safe to start immediately even before the tunnel has
+    /// resolved its URL.
+    public let directoryPublisher: DirectoryPublisher?
     /// Host-only. The `claude` subprocess driver. Created eagerly at
     /// host() time; the TurnManager drives it. Peers talk to Claude
     /// via the host's Lattice rows — they have no local driver.
@@ -51,10 +80,12 @@ public final class RoomInstance: Identifiable {
     /// last-writer-wins semantics make the writes idempotent. Peers
     /// seeing quorum locally get the status flip immediately instead
     /// of waiting for the host's sync round-trip.
-    private let voteCoordinator: ApprovalVoteCoordinator
+    /// Mutable: rebuilt after `swap()` so observers attach to the new
+    /// `Lattice` instance.
+    private var voteCoordinator: ApprovalVoteCoordinator
     /// Sibling of `voteCoordinator` for `AskQuestion` rows. Same
     /// run-everywhere, idempotent-writes story; different tally rule.
-    private let askCoordinator: AskVoteCoordinator
+    private var askCoordinator: AskVoteCoordinator
 
     /// Prefs handle — shared across all RoomInstances. Threaded from
     /// `RoomsModel` so `/nick` inside a room persists across launches.
@@ -74,9 +105,30 @@ public final class RoomInstance: Identifiable {
 
     private var catchUpTask: Task<Void, Never>?
     private var chatObserver: AnyCancellable?
+    /// Host-only. Bridge task: starts the tunnel, waits for URLs, writes
+    /// each new URL to `Session.publicURL`. Cancelled in `leave()`.
+    private var tunnelTask: Task<Void, Never>?
+    /// Watches `Session.publicURL` for tunnel-URL changes pushed by the
+    /// host and triggers `swap()` to reconnect. Optional only because
+    /// it's wired by the factory methods after `init`; in practice it's
+    /// always non-nil for a returned `RoomInstance`. The observer's
+    /// `evaluate()` is a no-op on host instances. Rebuilt after each
+    /// `swap()` because Lattice observers are tied to a specific
+    /// `Lattice` instance.
+    private var publicURLObserver: PublicURLObserver?
+
+    /// Opens a fresh peer-side `Lattice` against a new endpoint when
+    /// `swap()` runs. Injected so tests substitute a path-controlled
+    /// implementation; production uses `DefaultPeerLatticeStore` which
+    /// forwards to `RoomStore.openPeer`.
+    private let peerLatticeStore: any PeerLatticeStore
 
     /// Host-side factory — Session + Member rows already inserted by
     /// the caller. Starts the turn-manager chat observer.
+    ///
+    /// - Parameter tunnelManager: pass when `Session.visibility != .private`.
+    ///   The instance starts the tunnel asynchronously and bridges its
+    ///   `urlChanges` onto `Session.publicURL`. `nil` for LAN-only rooms.
     public static func host(
         lattice: Lattice,
         roomCode: String,
@@ -87,7 +139,10 @@ public final class RoomInstance: Identifiable {
         publisher: BonjourPublisher,
         driver: (any ClaudeDriver),
         turnManager: any TurnManaging,
-        prefs: AppPreferences
+        prefs: AppPreferences,
+        tunnelManager: TunnelManager? = nil,
+        directoryPublisher: DirectoryPublisher? = nil,
+        peerLatticeStore: any PeerLatticeStore = DefaultPeerLatticeStore()
     ) -> RoomInstance {
         let instance = RoomInstance(
             lattice: lattice,
@@ -100,8 +155,25 @@ public final class RoomInstance: Identifiable {
             publisher: publisher,
             driver: driver,
             turnManager: turnManager,
-            prefs: prefs)
+            prefs: prefs,
+            tunnelManager: tunnelManager,
+            directoryPublisher: directoryPublisher,
+            joinedViaTunnel: false,
+            peerLatticeStore: peerLatticeStore)
         instance.startChatObserver()
+        // No-op on host (observer guards isHost), but constructed so the
+        // peer/host code paths stay symmetric.
+        instance.publicURLObserver = PublicURLObserver(roomInstance: instance)
+        if tunnelManager != nil {
+            instance.startTunnelBridge()
+        }
+        // Directory heartbeat — safe to start before the tunnel
+        // resolves; the publisher skips cycles while
+        // `Session.publicURL == nil`, then publishes once the URL
+        // lands. No await needed; `start()` is fire-and-forget.
+        if let directoryPublisher {
+            Task { await directoryPublisher.start() }
+        }
         return instance
     }
 
@@ -114,7 +186,8 @@ public final class RoomInstance: Identifiable {
         lattice: Lattice,
         roomCode: String,
         joinCode: String?,
-        prefs: AppPreferences
+        prefs: AppPreferences,
+        peerLatticeStore: any PeerLatticeStore = DefaultPeerLatticeStore()
     ) -> RoomInstance {
         Log.line("room-peer", "creating peer nick=\(prefs.nick) roomCode=\(roomCode)")
         let me = Member()
@@ -122,6 +195,11 @@ public final class RoomInstance: Identifiable {
         me.isHost = false
         lattice.add(me)
         Log.line("room-peer", "inserted selfMember nick=\(me.nick)")
+
+        // Tunnel peers join through `wss://`; LAN peers via `ws://`.
+        // The scheme of the wssEndpoint baked into the lattice's
+        // configuration is the canonical record of which path was used.
+        let joinedViaTunnel = lattice.configuration.wssEndpoint?.scheme == "wss"
 
         let instance = RoomInstance(
             lattice: lattice,
@@ -134,8 +212,13 @@ public final class RoomInstance: Identifiable {
             publisher: nil,
             driver: nil,
             turnManager: nil,
-            prefs: prefs)
+            prefs: prefs,
+            tunnelManager: nil,
+            directoryPublisher: nil,
+            joinedViaTunnel: joinedViaTunnel,
+            peerLatticeStore: peerLatticeStore)
         instance.startPeerCatchUp(roomCode: roomCode)
+        instance.publicURLObserver = PublicURLObserver(roomInstance: instance)
         return instance
     }
 
@@ -150,7 +233,11 @@ public final class RoomInstance: Identifiable {
         publisher: BonjourPublisher?,
         driver: (any ClaudeDriver)?,
         turnManager: (any TurnManaging)?,
-        prefs: AppPreferences
+        prefs: AppPreferences,
+        tunnelManager: TunnelManager?,
+        directoryPublisher: DirectoryPublisher?,
+        joinedViaTunnel: Bool,
+        peerLatticeStore: any PeerLatticeStore
     ) {
         self.lattice = lattice
         self.roomCode = roomCode
@@ -162,11 +249,15 @@ public final class RoomInstance: Identifiable {
         self.publisher = publisher
         self.driver = driver
         self.turnManager = turnManager
+        self.tunnelManager = tunnelManager
+        self.directoryPublisher = directoryPublisher
+        self.joinedViaTunnel = joinedViaTunnel
         // Every room instance runs a coordinator — tally is
         // deterministic and writes are idempotent.
         self.voteCoordinator = ApprovalVoteCoordinator(lattice: lattice)
         self.askCoordinator = AskVoteCoordinator(lattice: lattice)
         self.prefs = prefs
+        self.peerLatticeStore = peerLatticeStore
     }
 
     private func startPeerCatchUp(roomCode: String) {
@@ -202,9 +293,132 @@ public final class RoomInstance: Identifiable {
     public func leave() async {
         catchUpTask?.cancel()
         chatObserver?.cancel()
+        tunnelTask?.cancel()
+        tunnelTask = nil
+        if let directoryPublisher { await directoryPublisher.stop() }
+        if let tunnelManager { await tunnelManager.stop() }
         if let driver { await driver.stop() }
         if let server { try? await server.stop() }
         publisher?.stop()
+    }
+
+    /// Host-only. Kicks off `cloudflared` (asynchronously, may take 2–10s
+    /// to resolve a URL) and pipes each new public URL onto
+    /// `Session.publicURL`. Peers observe that field via
+    /// `PublicURLObserver` and `swap()` to the new endpoint.
+    ///
+    /// `start()` failure (cloudflared not on `PATH`, etc.) is logged but
+    /// not surfaced — the room still works on LAN, the public-URL field
+    /// stays nil, and the UI can show a "tunnel unavailable" badge by
+    /// reading `Session.publicURL == nil`. Two-phase host: the LAN
+    /// experience never blocks on tunnel readiness.
+    private func startTunnelBridge() {
+        guard let tunnelManager else { return }
+        tunnelTask = Task { [weak self] in
+            do {
+                try await tunnelManager.start()
+            } catch {
+                Log.line("room-host", "tunnel start failed: \(error) — room is LAN-only")
+                return
+            }
+            for await url in tunnelManager.urlChanges {
+                if Task.isCancelled { return }
+                guard let self else { return }
+                self.session?.publicURL = url.absoluteString
+                Log.line("room-host", "Session.publicURL ← \(url.absoluteString)")
+                // Kick the directory publisher immediately. Without
+                // this, the heartbeat loop's first publish skips
+                // (wssURL is still nil at start time), and the next
+                // attempt is 30s away — meaning peers wait ~30s +
+                // KV propagation before discovering the room. The
+                // Worker's 25s rate limit caps any abuse.
+                if let directoryPublisher = self.directoryPublisher {
+                    Task { await directoryPublisher.nudge() }
+                }
+            }
+        }
+    }
+
+    /// Peer-only. Swap this instance's WS sync endpoint without
+    /// destroying the on-disk transcript. Used when the host's
+    /// `cloudflared` URL changes (tunnel restart) — the host's local
+    /// `RoomSyncServer` is unchanged, only the public address differs.
+    ///
+    /// The room's SQLite file stays at the same path (PID-scoping was
+    /// removed), so `_lattice_sync_state` carries the last-acked
+    /// globalId across `close()`+`open()`. The new WS connection sends
+    /// `?last-event-id=<thatUUID>` and the host streams only the delta
+    /// since. Unsynced local AuditLog rows replay against the new
+    /// server idempotently.
+    ///
+    /// Object references (Session, Member, etc.) are tied to the
+    /// previous `Lattice` instance and become invalid on close — they
+    /// are re-fetched from the new instance using stable `globalId`.
+    public func swap(toEndpoint endpoint: URL, joinCode: String?) throws {
+        precondition(
+            !isHost,
+            "RoomInstance.swap() is peer-only; the host's local server is unaffected by tunnel-URL changes")
+        Log.line(
+            "room-instance",
+            "swap → \(endpoint.absoluteString) joinCode=\(joinCode != nil ? "present" : "nil")")
+
+        // Snapshot stable identity for re-link after reopen.
+        let selfMemberGlobalId = selfMember?.globalId
+        let sessionCode = self.roomCode
+
+        // Cancel observers / tasks tied to the old Lattice.
+        catchUpTask?.cancel()
+        catchUpTask = nil
+        chatObserver?.cancel()
+        chatObserver = nil
+
+        // Drop model references *before* close. `self` is `@Observable`,
+        // so any later assignment to `selfMember` or `session` triggers
+        // a setter that reads the old value — which by then would be a
+        // dangling pointer into the closed Lattice's C++ store, crashing
+        // SQLite/the binding layer. Niling them while the old Lattice is
+        // still live releases their backing handles cleanly.
+        self.selfMember = nil
+        self.session = nil
+
+        // Close the old connection BEFORE opening the new one — two
+        // Lattice instances on the same SQLite file race their WS
+        // sync clients on `_lattice_sync_state` and the new client
+        // never connects (`broadcast … to 0 peers`). Single-handle
+        // ordering keeps the sync state unambiguous.
+        lattice.close()
+
+        let newLattice = try peerLatticeStore.openPeer(
+            code: roomCode,
+            endpoint: endpoint,
+            joinCode: joinCode)
+        self.lattice = newLattice
+        self.joinCode = joinCode
+
+        // Rebuild coordinators on the new instance — old ones drop and
+        // their `AnyCancellable` observers cancel automatically.
+        self.voteCoordinator = ApprovalVoteCoordinator(lattice: newLattice)
+        self.askCoordinator = AskVoteCoordinator(lattice: newLattice)
+
+        // Re-link object references from the new instance. Same on-disk
+        // rows, fresh object identity.
+        if let gid = selfMemberGlobalId {
+            self.selfMember = newLattice.object(Member.self, globalId: gid)
+        }
+        let resolvedSession = newLattice.objects(Session.self)
+            .first(where: { $0.code == sessionCode })
+        if let resolvedSession {
+            linkToSession(resolvedSession)
+        } else {
+            // Session row hasn't synced yet on the new connection — restart
+            // the catch-up task so the link backfills once it arrives.
+            self.session = nil
+            startPeerCatchUp(roomCode: roomCode)
+        }
+
+        // Re-attach the publicURL observer to the new Lattice instance.
+        // Old observer's AnyCancellable drops here.
+        self.publicURLObserver = PublicURLObserver(roomInstance: self)
     }
 
     // MARK: - Host-side chat observer → TurnManager

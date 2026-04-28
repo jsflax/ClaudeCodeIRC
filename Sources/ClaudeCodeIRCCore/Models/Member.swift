@@ -18,11 +18,6 @@ public final class Member {
     public var isAway: Bool = false
     public var awayReason: String? = nil
 
-    /// Preflight fields used by host election. Each peer writes its own values
-    /// on join so the election algorithm can filter candidates.
-    public var hasClaudeHelper: Bool = false
-    public var canHostCwd: String? = nil
-
     public var session: Session?
 
     @Relation(link: \ChatMessage.author)

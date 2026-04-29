@@ -49,6 +49,21 @@ struct ClaudeCodeIRCApp: App {
             RunLoop.main.run()
             return
         }
+        // First-run dependency gate. Refuse to boot without `claude`;
+        // the TUI lobby is cosmetic without it. `cloudflared` missing
+        // is non-blocking — surface only when the user tries to host
+        // a non-Private room. See Doctor.swift for rationale.
+        let report = Doctor.check()
+        if report.claudePath == nil {
+            FileHandle.standardError.write(Data("""
+                ClaudeCodeIRC needs `claude` (Anthropic CLI) — not found on PATH.
+
+                Install:   npm install -g @anthropic-ai/claude-code
+                No Node?   brew install node    (then re-run claudecodeirc)
+
+                """.utf8))
+            exit(1)
+        }
         let app = Self.init()
         app.body.run()
     }

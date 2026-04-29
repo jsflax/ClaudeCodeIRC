@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: swift build -c release --disable-sandbox --product claudecodeirc
+
+      - name: Ad-hoc code sign
+        run: codesign --force --sign - .build/release/claudecodeirc
+
+      - name: Tar binary
+        run: tar -czf claudecodeirc-darwin-arm64.tar.gz -C .build/release claudecodeirc
+
+      - name: Compute SHA256
+        run: shasum -a 256 claudecodeirc-darwin-arm64.tar.gz
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            claudecodeirc-darwin-arm64.tar.gz \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

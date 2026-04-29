@@ -772,17 +772,8 @@ struct WorkspaceView: View {
     /// error feedback goes to the log — there's nowhere visible to
     /// render a system ChatMessage.
     private func joinDiscovered(nameFilter: String?, room currentRoom: RoomInstance?) {
-        let joined = Set(model.joinedRooms.map(\.roomCode))
+        let candidates = discoverableRooms()
         let filter = nameFilter?.lowercased()
-
-        // Bonjour rooms + directory rooms unioned into one list. Both
-        // produce `DiscoveredRoom`s; directory rooms carry an explicit
-        // `wssURLOverride` (the cloudflared tunnel URL), Bonjour rooms
-        // compute `wsURL` from `hostname:port`. Either way the join
-        // overlay + `model.join` chain is the same.
-        let candidates = (model.browser.rooms + directoryAsDiscoveredRooms())
-            .filter { !joined.contains($0.roomCode) }
-
         let target: DiscoveredRoom?
         if let filter, !filter.isEmpty {
             target = candidates.first { $0.name.lowercased().hasPrefix(filter) }
@@ -796,6 +787,25 @@ struct WorkspaceView: View {
             return
         }
         activateDiscovered(target, currentRoom: currentRoom)
+    }
+
+    /// Single source of truth for "rooms I could join right now",
+    /// shared by `/join`, the LAN-discovered sidebar row, and the
+    /// directory-listed (public / group) sidebar rows. Bonjour finds
+    /// + every directory bucket get normalised into `DiscoveredRoom`;
+    /// joined rooms drop out; same-room duplicates keep the directory
+    /// entry (the host's chosen visibility — public / group — is the
+    /// source of truth, LAN discovery is a transport detail).
+    private func discoverableRooms() -> [DiscoveredRoom] {
+        let joined = Set(model.joinedRooms.map(\.roomCode))
+        let directory = directoryAsDiscoveredRooms()
+        let directoryCodes = Set(directory.map(\.roomCode))
+        // LAN-only rooms: a Bonjour find that isn't also published in
+        // any directory bucket. Same Bonjour entry that's ALSO in
+        // public/group is suppressed here so the room shows in the
+        // section the host actually advertised it under.
+        let lanOnly = model.browser.rooms.filter { !directoryCodes.contains($0.roomCode) }
+        return (directory + lanOnly).filter { !joined.contains($0.roomCode) }
     }
 
     /// Open a `DiscoveredRoom` — the only side-effect-bearing path
@@ -835,7 +845,7 @@ struct WorkspaceView: View {
                 cwd: "",
                 hostname: url.host ?? "",
                 port: url.port ?? 443,
-                requiresJoinCode: true,
+                requiresJoinCode: room.requireJoinCode,
                 wssURLOverride: url))
         }
         return out
@@ -948,12 +958,13 @@ struct WorkspaceView: View {
             model.activate(id)
         case .recent(let code):
             activateRecent(code: code, currentRoom: here)
-        case .lan(let id):
-            guard let room = model.browser.rooms.first(where: { $0.id == id }) else { return }
-            activateDiscovered(room, currentRoom: here)
-        case .publicRoom(let roomId), .groupRoom(_, let roomId):
-            guard let room = directoryAsDiscoveredRooms()
-                .first(where: { $0.roomCode == roomId }) else { return }
+        case .lan(let code), .publicRoom(let code), .groupRoom(_, let code):
+            // All three "discovered room" cases resolve through the
+            // same `discoverableRooms()` candidate set as `/join` so
+            // the lookup, the visibility-precedence dedup, and the
+            // join-code handling stay consistent across surfaces.
+            guard let room = discoverableRooms().first(where: { $0.roomCode == code })
+            else { return }
             activateDiscovered(room, currentRoom: here)
         }
         focusedPane = .input

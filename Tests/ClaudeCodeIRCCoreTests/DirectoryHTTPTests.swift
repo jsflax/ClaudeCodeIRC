@@ -116,6 +116,7 @@ import ClaudeCodeIRCCore
             roomName: "test-room",
             hostHandle: "alice",
             groupId: "public",
+            requireJoinCode: false,
             wssURLProvider: { testURL },
             publishVersionProvider: { await counter.get() },
             publishVersionConsumer: { await counter.set($0) },
@@ -155,6 +156,7 @@ import ClaudeCodeIRCCore
             roomName: "n",
             hostHandle: "h",
             groupId: "public",
+            requireJoinCode: false,
             wssURLProvider: { nil },        // tunnel hasn't resolved
             publishVersionProvider: { 0 },
             publishVersionConsumer: { _ in },
@@ -179,6 +181,7 @@ import ClaudeCodeIRCCore
             roomName: "n",
             hostHandle: "h",
             groupId: "public",
+            requireJoinCode: false,
             wssURLProvider: { URL(string: "wss://x/room/rm")! },
             publishVersionProvider: { await counter.get() },
             publishVersionConsumer: { await counter.set($0) },
@@ -203,6 +206,7 @@ import ClaudeCodeIRCCore
             roomName: "n",
             hostHandle: "h",
             groupId: "public",
+            requireJoinCode: false,
             wssURLProvider: { URL(string: "wss://x/room/rm99")! },
             publishVersionProvider: { 0 },
             publishVersionConsumer: { _ in },
@@ -224,7 +228,7 @@ import ClaudeCodeIRCCore
         StubURLProtocol.reset()
         let listBody = """
             {"version":1,"rooms":[
-              {"roomId":"r1","name":"alpha","hostHandle":"alice","wssURL":"wss://a/room/r1","lastSeenAge":3}
+              {"roomId":"r1","name":"alpha","hostHandle":"alice","wssURL":"wss://a/room/r1","lastSeenAge":3,"requireJoinCode":false}
             ]}
             """
         StubURLProtocol.responses["GET /list"] = .init(

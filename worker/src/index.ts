@@ -32,6 +32,7 @@ interface RoomEntry {
   groupId: string;          // "public" if no group
   publishVersion: number;   // monotonic, host-side
   publishedAt: number;      // server-set, ms epoch
+  requireJoinCode: boolean;
 }
 
 const TTL_SECONDS = 180;
@@ -71,7 +72,7 @@ async function handlePublish(req: Request, env: Env): Promise<Response> {
 
   const required = [
     "version", "roomId", "name", "hostHandle",
-    "wssURL", "groupId", "publishVersion",
+    "wssURL", "groupId", "publishVersion", "requireJoinCode",
   ] as const;
   for (const k of required) {
     if (body[k] === undefined || body[k] === null) {
@@ -125,6 +126,7 @@ async function handlePublish(req: Request, env: Env): Promise<Response> {
     groupId: body.groupId!,
     publishVersion: body.publishVersion!,
     publishedAt: Date.now(),
+    requireJoinCode: body.requireJoinCode!,
   };
 
   await env.LOBBY.put(roomKey, JSON.stringify(entry), {
@@ -173,6 +175,7 @@ async function handleList(env: Env, groupId: string): Promise<Response> {
       hostHandle: entry.hostHandle,
       wssURL: entry.wssURL,
       lastSeenAge: Math.floor((Date.now() - entry.publishedAt) / 1000),
+      requireJoinCode: entry.requireJoinCode,
     });
   }
   return json({ version: 1, rooms });

@@ -389,6 +389,10 @@ public final class RoomsModel {
             roomName: session.name,
             hostHandle: prefs.nick,
             groupId: groupId,
+            // Echoes the host's join-code requirement to peers via
+            // the directory listing so the join overlay can skip
+            // prompting for a code on open rooms.
+            requireJoinCode: session.joinCode != nil,
             // `cloudflared` exposes the tunnel as `https://*.trycloudflare.com`
             // (it's a Cloudflare HTTPS edge that upgrades to WebSocket
             // on demand). The Worker rejects non-`wss://` URLs, and a

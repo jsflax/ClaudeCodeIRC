@@ -72,13 +72,18 @@ struct UserRow: View {
     var body: some View {
         var line = Text(highlighted ? "▸" : " ")
         line = line + Text(mode).foregroundColor(.yellow)
+        // Self renders green so the user's own row pops; bots get
+        // yellow (matches the chat-pane treatment of `@claude`); away
+        // members dim. Everyone else hashes through `NickColor` so
+        // their colour matches the chat scrollback — same person
+        // reads as the same colour in both surfaces.
         let nickColor: Color = isAway
             ? .dim
             : isBot
                 ? .yellow
                 : isSelf
                     ? .green
-                    : .white
+                    : NickColor.color(for: nick)
         var nickText = Text(nick).foregroundColor(nickColor)
         if isSelf { nickText = nickText.bold() }
         line = line + nickText

@@ -28,6 +28,7 @@ public actor DirectoryPublisher {
     private let roomName: String
     private let hostHandle: String
     private let groupId: String
+    private let requireJoinCode: Bool
     private let wssURLProvider: @Sendable () async -> URL?
 
     /// Read-modify-write of `AppPreferences.publishVersion` — bumped
@@ -50,6 +51,7 @@ public actor DirectoryPublisher {
         roomName: String,
         hostHandle: String,
         groupId: String,
+        requireJoinCode: Bool,
         wssURLProvider: @escaping @Sendable () async -> URL?,
         publishVersionProvider: @escaping @Sendable () async -> Int,
         publishVersionConsumer: @escaping @Sendable (Int) async -> Void,
@@ -60,6 +62,7 @@ public actor DirectoryPublisher {
         self.roomName = roomName
         self.hostHandle = hostHandle
         self.groupId = groupId
+        self.requireJoinCode = requireJoinCode
         self.wssURLProvider = wssURLProvider
         self.publishVersionProvider = publishVersionProvider
         self.publishVersionConsumer = publishVersionConsumer
@@ -113,7 +116,8 @@ public actor DirectoryPublisher {
             hostHandle: hostHandle,
             wssURL: wssURL.absoluteString,
             groupId: groupId,
-            publishVersion: nextVersion)
+            publishVersion: nextVersion,
+            requireJoinCode: requireJoinCode)
 
         var req = URLRequest(url: endpoint.appendingPathComponent("publish"))
         req.httpMethod = "POST"

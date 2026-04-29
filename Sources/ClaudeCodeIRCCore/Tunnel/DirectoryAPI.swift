@@ -19,6 +19,10 @@ public enum DirectoryAPI {
         public let wssURL: String
         public let groupId: String
         public let publishVersion: Int
+        /// True when the host requires a join code to enter (set on
+        /// the host form). Peers use this to decide whether the join
+        /// overlay prompts for a code or connects directly.
+        public let requireJoinCode: Bool
 
         public init(
             roomId: String,
@@ -26,7 +30,8 @@ public enum DirectoryAPI {
             hostHandle: String,
             wssURL: String,
             groupId: String,
-            publishVersion: Int
+            publishVersion: Int,
+            requireJoinCode: Bool
         ) {
             self.version = DirectoryAPI.protocolVersion
             self.roomId = roomId
@@ -35,6 +40,7 @@ public enum DirectoryAPI {
             self.wssURL = wssURL
             self.groupId = groupId
             self.publishVersion = publishVersion
+            self.requireJoinCode = requireJoinCode
         }
     }
 
@@ -67,6 +73,8 @@ public enum DirectoryAPI {
         public let hostHandle: String
         public let wssURL: String
         public let lastSeenAge: Int
+        /// Echoes the host's `requireJoinCode` flag from `/publish`.
+        public let requireJoinCode: Bool
 
         public var id: String { roomId }
     }

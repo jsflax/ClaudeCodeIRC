@@ -52,17 +52,33 @@ struct SessionsSidebar: View {
     let selectedRow: SessionsSelection?
     @Environment(\.palette) var palette
 
-    /// Rooms the browser found on the LAN that we haven't already
-    /// joined — avoid duplicate rows for a room we're sitting in.
-    private var discoveredUnjoined: [DiscoveredRoom] {
-        let joinedCodes = Set(model.joinedRooms.map(\.roomCode))
-        return model.browser.rooms.filter { !joinedCodes.contains($0.roomCode) }
-    }
-
     /// Codes already in `joinedRooms`. Used by every "discovery"
     /// section to suppress duplicate rows for rooms we're already in.
     private var joinedCodes: Set<String> {
         Set(model.joinedRooms.map(\.roomCode))
+    }
+
+    /// Codes the host published to the directory — across the public
+    /// bucket and every group. Drives the LAN dedup: a Bonjour find
+    /// whose code is also in any directory bucket should NOT show in
+    /// the `lan` section, because the host's chosen visibility
+    /// (public / group) is what we honour. LAN discovery is a
+    /// transport detail — we still use the LAN ws:// URL when
+    /// joining if available, but the row is filed under the section
+    /// the host advertised it under.
+    private var directoryCodes: Set<String> {
+        var codes: Set<String> = []
+        for rooms in model.directoryRoomsByGroup.values {
+            for room in rooms { codes.insert(room.roomId) }
+        }
+        return codes
+    }
+
+    /// Rooms the browser found on the LAN that we haven't joined and
+    /// that aren't also published in any directory bucket.
+    private var discoveredUnjoined: [DiscoveredRoom] {
+        let suppressed = joinedCodes.union(directoryCodes)
+        return model.browser.rooms.filter { !suppressed.contains($0.roomCode) }
     }
 
     /// Public-bucket rooms from the directory minus already-joined.
@@ -109,7 +125,7 @@ struct SessionsSidebar: View {
             ForEach(discoveredUnjoined) { room in
                 DiscoveredRow(
                     room: room,
-                    highlighted: paneFocused && selectedRow == .lan(room.id))
+                    highlighted: paneFocused && selectedRow == .lan(room.roomCode))
             }
 
             // Public bucket — directory rooms anyone can browse. Hidden
@@ -152,6 +168,13 @@ struct SessionsSidebar: View {
     static func flatRows(model: RoomsModel) -> [SessionsSelection] {
         var rows: [SessionsSelection] = []
         let joinedCodes = Set(model.joinedRooms.map(\.roomCode))
+        // Same dedup rule as the live sidebar: a Bonjour find that's
+        // also published in any directory bucket gets filed under
+        // public/group, not LAN.
+        var directoryCodes: Set<String> = []
+        for ds in model.directoryRoomsByGroup.values {
+            for r in ds { directoryCodes.insert(r.roomId) }
+        }
 
         for room in model.joinedRooms {
             rows.append(.joined(room.id))
@@ -159,8 +182,10 @@ struct SessionsSidebar: View {
         for entry in model.recentLattices {
             rows.append(.recent(entry.code))
         }
-        for room in model.browser.rooms where !joinedCodes.contains(room.roomCode) {
-            rows.append(.lan(room.id))
+        for room in model.browser.rooms
+        where !joinedCodes.contains(room.roomCode)
+            && !directoryCodes.contains(room.roomCode) {
+            rows.append(.lan(room.roomCode))
         }
         let publics = (model.directoryRoomsByGroup[GroupID.publicBucket] ?? [])
             .filter { !joinedCodes.contains($0.roomId) }

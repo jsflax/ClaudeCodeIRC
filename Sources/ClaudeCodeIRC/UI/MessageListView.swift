@@ -220,10 +220,11 @@ struct MessageRow: View {
         case .action:
             actionLine(time: t, nick: m.author?.nick ?? "?", text: m.text)
         case .user, .assistant:
+            let nick = m.author?.nick ?? "?"
             authoredBody(
                 time: t,
-                nick: m.author?.nick ?? "?",
-                nickColor: .cyan,
+                nick: nick,
+                nickColor: NickColor.color(for: nick),
                 text: m.text)
         }
     }
@@ -246,9 +247,10 @@ struct MessageRow: View {
     }
 
     private func actionLine(time: String, nick: String, text: String) -> Text {
+        let color = NickColor.color(for: nick)
         var line = Text("\(time) * ").foregroundColor(.dim)
-        line = line + Text("\(nick) ").foregroundColor(.cyan)
-        line = line + Text(text).foregroundColor(.cyan)
+        line = line + Text("\(nick) ").foregroundColor(color)
+        line = line + Text(text).foregroundColor(color)
         return line
     }
 

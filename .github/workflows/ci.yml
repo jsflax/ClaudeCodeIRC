@@ -12,6 +12,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The runner ships with Swift 6.1; the package + lattice both
+      # declare swift-tools-version 6.3. Install the latest 6.3 dev
+      # snapshot from swift.org and prepend its bin to PATH so the
+      # subsequent `swift` invocations pick it up.
+      - name: Install Swift 6.3 toolchain
+        shell: bash
+        run: |
+          set -eux
+          BRANCH="swift-6.3-branch"
+          curl -fL "https://download.swift.org/${BRANCH}/xcode/latest-build.yml" -o /tmp/latest.yml
+          DIR=$(grep '^dir:' /tmp/latest.yml | awk '{print $2}')
+          PKG="${DIR}-osx.pkg"
+          curl -fLo /tmp/swift.pkg "https://download.swift.org/${BRANCH}/xcode/${DIR}/${PKG}"
+          sudo installer -pkg /tmp/swift.pkg -target /
+          echo "/Library/Developer/Toolchains/${DIR}.xctoolchain/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Swift version
+        run: swift --version
+
       - name: Build
         run: swift build
 

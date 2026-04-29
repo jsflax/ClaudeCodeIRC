@@ -199,6 +199,26 @@ public final class RoomsModel {
     ///   the directory-listed flow (L2/L3) and require the
     ///   `cloudflared` tunnel; the tunnel's resolved URL appears on
     ///   `Session.publicURL` once ready.
+    /// Errors thrown by `host(...)` before the room is created. Caught
+    /// by `HostFormOverlay` and rendered inline so the user can fix the
+    /// precondition and resubmit.
+    public enum HostError: Error, LocalizedError {
+        /// Visibility is `.public` or `.group` but `cloudflared` is not
+        /// on PATH. Public/Group rooms route through a Cloudflare quick
+        /// tunnel; without it there is no public URL to expose, so we
+        /// refuse to host rather than silently downgrading to LAN-only
+        /// (which would leave the user staring at `[public:pending]`
+        /// forever with no signal as to why).
+        case cloudflaredMissing
+
+        public var errorDescription: String? {
+            switch self {
+            case .cloudflaredMissing:
+                return "cloudflared not installed — run: brew install cloudflared"
+            }
+        }
+    }
+
     @discardableResult
     public func host(
         name: String,
@@ -208,6 +228,14 @@ public final class RoomsModel {
         visibility: SessionVisibility = .private,
         groupHashHex: String? = nil
     ) async throws -> RoomInstance {
+        // Cloudflared is a hard prerequisite for non-private rooms.
+        // Check it before allocating any per-room state so a
+        // resubmission after `brew install cloudflared` starts clean.
+        if visibility != .private, Doctor.which("cloudflared") == nil {
+            Log.line("rooms", "host refused: cloudflared not on PATH (visibility=\(visibility.rawValue))")
+            throw HostError.cloudflaredMissing
+        }
+
         let roomCode = Self.generateCode()
         let joinCode: String? = requireJoinCode ? Self.generateCode() : nil
         Log.line("rooms", "host name=\(name) cwd=\(cwd) roomCode=\(roomCode) auth=\(requireJoinCode ? "required" : "open") visibility=\(visibility.rawValue)")

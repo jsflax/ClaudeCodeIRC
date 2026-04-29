@@ -1227,7 +1227,12 @@ struct HostFormOverlay: View {
                     groupHashHex: groupHashHex)
                 onCreated(room)
             } catch {
-                self.error = "\(error)"
+                // `LocalizedError` (RoomsModel.HostError, etc.) gives a
+                // friendly string; arbitrary `Error`s fall back to
+                // `localizedDescription`, which is at minimum a real
+                // sentence rather than the raw type dump that
+                // `"\(error)"` produces.
+                self.error = error.localizedDescription
             }
         }
     }

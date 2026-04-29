@@ -34,6 +34,13 @@ public enum InputRouter {
         /// on peer it just disconnects.
         case leave
 
+        /// Host-only. Remove a member from the room by nick. The
+        /// host's lattice deletes the target Member row; the delete
+        /// syncs to the kicked peer, whose `selfMemberObserver`
+        /// auto-ejects them. Kicking yourself by nick aliases to
+        /// `/leave`.
+        case kick(String)
+
         /// Hide scrollback up to now in this client's view. Doesn't
         /// delete any Lattice rows; a `scrollbackFloor: Date` on the
         /// RoomInstance is set to `.now` and `MessageListView`
@@ -142,6 +149,14 @@ public enum InputRouter {
             return .members
         case "leave":
             return .leave
+        case "kick":
+            guard !rest.isEmpty else { return .unknown("/kick needs a nick") }
+            // Same single-token rule as /nick — the rest of the line
+            // is the target's nick, no embedded whitespace allowed.
+            guard !rest.contains(where: { $0.isWhitespace }) else {
+                return .unknown("/kick takes one nick (no whitespace)")
+            }
+            return .kick(rest)
         case "clear":
             return .clear
         case "topic":
@@ -207,6 +222,7 @@ public enum InputRouter {
         Command(name: "clear",   usage: "/clear",          description: "hide scrollback up to now (local)"),
         Command(name: "palette", usage: "/palette",        description: "pick a UI palette — phosphor / amber / modern / claude"),
         Command(name: "leave",   usage: "/leave",          description: "leave the room"),
+        Command(name: "kick",    usage: "/kick <nick>",    description: "host-only — remove a member from the room"),
     ]
 
     /// Commands whose name starts with `prefix` (after the leading `/`),
@@ -232,6 +248,7 @@ public enum InputRouter {
           /clear             hide scrollback up to now (local only)
           /palette           pick a UI palette
           /leave             leave the room
+          /kick <nick>       host-only — remove a member from the room
         trigger Claude:
           @claude <prompt>   mention to ask Claude (case-insensitive)
         """

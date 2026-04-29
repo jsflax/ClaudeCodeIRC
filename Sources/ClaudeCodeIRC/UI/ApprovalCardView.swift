@@ -24,6 +24,14 @@ struct ApprovalCardView: View {
     let isHost: Bool
 
     @Query var members: TableResults<Member>
+    /// Drives re-render when peers' ApprovalVotes arrive via Lattice
+    /// sync. `request.votes` is a `@Relation` backlink — traversing
+    /// it doesn't subscribe NCursesUI's observation tracker to
+    /// inserts, so a peer's vote landing via sync invalidates the
+    /// request row but not THIS view. An explicit `@Query` on the
+    /// vote model forces a re-render whenever any ApprovalVote
+    /// inserts/updates.
+    @Query var allApprovalVotes: TableResults<ApprovalVote>
 
     var body: some View {
         CardView(

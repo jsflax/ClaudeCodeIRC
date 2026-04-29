@@ -10,6 +10,16 @@ public final class AppPreferences {
     @Unique()
     public var key: String = "singleton"
     public var nick: String = ""
+
+    /// Stable, per-device user identity. Generated once when the
+    /// singleton prefs row is first inserted and persisted forever
+    /// after. Stamped onto every `Member` row this user creates so
+    /// rejoin paths can locate "my Member" without nick comparison
+    /// (nicks are mutable + collide). Not synced — each device gets
+    /// its own and treats it as the global identity it shares with
+    /// every room it joins.
+    public var userId: UUID = UUID()
+
     public var lastCwd: String = ""
 
     /// Active palette — picked via the palette selector overlay and

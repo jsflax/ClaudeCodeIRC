@@ -1,8 +1,15 @@
 import ClaudeCodeIRCCore
 import Foundation
-import struct Lattice.Lattice
-import class Lattice.TableResults
+import Lattice
 import NCursesUI
+
+// Both `Lattice` and `ClaudeCodeIRCCore` (the latter via `App/Query.swift`)
+// publicly export a `Query<T>`. The full `import Lattice` is needed
+// for the `Query<T>` operator overloads + `LatticeUnion` conformances
+// used in `.where { ... }` closures, but it makes the bare `Query`
+// name ambiguous at use sites. Pin the unqualified name to the
+// app's property-wrapper in CCIRCCore.
+typealias Query<T: Lattice.Model> = ClaudeCodeIRCCore.Query<T>
 
 /// Tab-cycle stops in `WorkspaceView`. The center chat pane is
 /// intentionally not a focus stop — its scroll view already owns
@@ -228,7 +235,20 @@ struct WorkspaceView: View {
                 focusedPane = .input
                 sessionsSelection = nil
                 usersSelection = nil
+                return
             }
+            // Otherwise: interrupt the active Claude turn. Anyone in
+            // the room can request the interrupt — flipping the
+            // Lattice flag on a peer propagates to the host via sync,
+            // and only the host's `cancelObserver` actually stops the
+            // subprocess. Local ESC on the host short-circuits via
+            // the same observer.
+            guard let room = model.activeRoom else { return }
+            let streaming = room.lattice.objects(Turn.self)
+                .where { $0.status == TurnStatus.streaming && $0.cancelRequested == false }
+                .first
+            guard let streaming else { return }
+            streaming.cancelRequested = true
         }
         // Ctrl+N / Ctrl+P cycle joined rooms. ASCII control codes —
         // 14 ("N"-64) and 16 ("P"-64). ncurses surfaces them as raw
@@ -301,6 +321,25 @@ struct WorkspaceView: View {
             askPendingBallot = []
             askActiveQuestionId = pendingAskQuestion?.globalId
         }
+        // Drain `RoomsModel.pendingNotice` (one-shot user-facing string
+        // posted by the model — e.g. a kick) into the active room's
+        // chat as a system message. With no active room we leave the
+        // notice set so `WelcomePane` can render it as a banner; it'll
+        // get drained the next time the user activates a room.
+        .task(id: model.pendingNotice) {
+            if let notice = model.pendingNotice, let room = model.activeRoom {
+                insertSystem(room: room, notice)
+                model.pendingNotice = nil
+            }
+        }
+        // When the user does activate a room, drain any sticky notice
+        // out of the lobby banner into that room's chat.
+        .task(id: model.activeRoomId) {
+            if let notice = model.pendingNotice, let room = model.activeRoom {
+                insertSystem(room: room, notice)
+                model.pendingNotice = nil
+            }
+        }
         // Auto-seed sidebar selection when focus enters a sidebar.
         // Picks the first visible row so the user doesn't have to
         // press ↓ before Enter does anything.
@@ -336,7 +375,9 @@ struct WorkspaceView: View {
                 askPendingBallot: askPendingBallot,
                 extraChromeRows: extraChromeRows)
         } else {
-            WelcomePane(pendingNewGroupInvite: pendingNewGroupInvite)
+            WelcomePane(
+                pendingNewGroupInvite: pendingNewGroupInvite,
+                pendingNotice: model.pendingNotice)
         }
     }
 
@@ -717,6 +758,28 @@ struct WorkspaceView: View {
         case .leave:
             let id = room.id
             Task { await model.leave(id) }
+        case .kick(let nick):
+            // Host-only. Self-kick aliases to /leave so the host can
+            // type either spelling. For everyone else, find the
+            // Member by nick and delete the row — Lattice sync fans
+            // the delete out, and the kicked peer's
+            // `selfMemberObserver` self-ejects.
+            guard room.isHost else {
+                insertSystem(room: room, "only the host can /kick")
+                return
+            }
+            if nick == room.selfMember?.nick {
+                let id = room.id
+                Task { await model.leave(id) }
+                return
+            }
+            guard let target = room.lattice.objects(Member.self)
+                .first(where: { $0.nick == nick }) else {
+                insertSystem(room: room, "no such member: \(nick)")
+                return
+            }
+            room.lattice.delete(target)
+            insertSystem(room: room, "\(nick) was kicked")
         case .clear:
             // Local-only scrollback hide. No Lattice write — floor
             // lives on the RoomInstance and MessageListView reads
@@ -875,9 +938,11 @@ struct WorkspaceView: View {
     }
 
     /// Reopen a recent room by code — host vs peer is decided by
-    /// reading the cached `Session.host.nick` against `prefs.nick`.
-    /// Peer reopen needs `Session.publicURL`; without it the user has
-    /// to rejoin via Bonjour / directory.
+    /// matching the cached `Session.host.userId` against `prefs.userId`.
+    /// `userId` is stable across `/nick` and across crashes; matching
+    /// against `nick` was brittle (collisions, renames). Peer reopen
+    /// needs `Session.publicURL`; without it the user has to rejoin
+    /// via Bonjour / directory.
     ///
     /// Shared by `/reopen <name>` and the recent-row Enter activation.
     private func activateRecent(code: String, currentRoom: RoomInstance?) {
@@ -888,7 +953,7 @@ struct WorkspaceView: View {
             feedback("recent room '\(code)' has no session row", room: currentRoom)
             return
         }
-        let isHostRoom = (s.host?.nick == model.prefs.nick)
+        let isHostRoom = (s.host?.userId == model.prefs.userId)
         if isHostRoom {
             Task {
                 do { _ = try await model.reopenAsHost(code: code) }
@@ -1268,6 +1333,12 @@ struct WelcomePane: View {
     /// so they can copy/share it. Cleared by the workspace when the
     /// user joins/hosts a room (or types `/clear`).
     var pendingNewGroupInvite: String? = nil
+    /// One-shot notice from `RoomsModel` (e.g. "you were kicked from
+    /// <room>") rendered as a yellow banner. Persists in lobby until
+    /// the user joins/hosts another room — clearing happens via the
+    /// `.task(id:)` drain in `WorkspaceView` once an active room is
+    /// available to host the system message.
+    var pendingNotice: String? = nil
 
     var body: some View {
         VStack {
@@ -1278,6 +1349,10 @@ struct WelcomePane: View {
                 .foregroundColor(.dim)
             Text("claude only replies when addressed — use `@claude` anywhere in a message.")
                 .foregroundColor(.dim)
+            if let notice = pendingNotice {
+                SpacerView(1)
+                Text(notice).foregroundColor(.yellow)
+            }
             if let invite = pendingNewGroupInvite {
                 SpacerView(1)
                 Text("group created — share this invite:").foregroundColor(.dim)

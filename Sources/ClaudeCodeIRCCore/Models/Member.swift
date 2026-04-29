@@ -3,6 +3,16 @@ import Lattice
 
 @Model
 public final class Member {
+    /// Stable, per-device identity (mirrored from `AppPreferences.userId`).
+    /// Used to find "my Member" on rejoin instead of comparing nicks —
+    /// nicks change with `/nick` and collide across users. Indexed so
+    /// the rejoin lookup `WHERE userId = ?` is a single SQL hit. Not
+    /// `@Unique` — the same global user can have a Member row in many
+    /// rooms (different lattice files), and over time within a single
+    /// room if delete-and-reinsert ever happens.
+    @Indexed()
+    public var userId: UUID = UUID()
+
     public var nick: String = ""
     public var isHost: Bool = false
 

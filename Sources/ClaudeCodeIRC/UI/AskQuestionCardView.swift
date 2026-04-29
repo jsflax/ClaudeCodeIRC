@@ -32,6 +32,15 @@ struct AskQuestionCardView: View {
     let selfMember: Member?
 
     @Query var members: TableResults<Member>
+    /// Drives re-render when peers' AskVotes arrive via Lattice sync.
+    /// `question.votes` is a `@Relation` backlink — traversing it
+    /// reads the rows but doesn't subscribe to inserts in NCursesUI's
+    /// observation tracker, so a peer-side vote arriving via sync
+    /// invalidates the question row but not THIS view. An explicit
+    /// `@Query` on the vote model forces a re-render whenever any
+    /// AskVote inserts/updates; the body still reads `question.votes`
+    /// so the filtering stays correct.
+    @Query var allAskVotes: TableResults<AskVote>
 
     /// Sentinel row index for the trailing "Other…" entry. Lives just
     /// past `question.options.count`.

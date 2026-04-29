@@ -56,6 +56,12 @@ public final class RoomsModel {
     /// "welcome" empty state is shown in the center pane.
     public var activeRoomId: UUID?
 
+    /// One-shot user-facing notice posted by `RoomsModel` itself
+    /// (e.g. "kicked from <room>") that the workspace view drains
+    /// into the active room's chat as a system message. The view is
+    /// responsible for clearing this back to `nil` after rendering.
+    public var pendingNotice: String?
+
     /// Convenience accessor — `nil` while on the welcome state.
     public var activeRoom: RoomInstance? {
         guard let id = activeRoomId else { return nil }
@@ -254,6 +260,7 @@ public final class RoomsModel {
 
         let me = Member()
         me.nick = prefs.nick
+        me.userId = prefs.userId
         me.isHost = true
         me.session = session
         lattice.add(me)
@@ -515,15 +522,36 @@ public final class RoomsModel {
             lattice.close()
             throw ReopenError.sessionNotFound
         }
+        let userId = prefs.userId
         let me: Member
         if let existing = session.host {
             existing.nick = prefs.nick   // user may have /nick'd since last run
+            existing.userId = userId     // defensive — pre-userId rows have a default UUID
+            existing.isAway = false
+            existing.awayReason = nil
+            existing.lastSeenAt = Date()
+            me = existing
+        } else if let existing = lattice.objects(Member.self)
+            .where({ $0.userId == userId })
+            .first {
+            // Session exists but its `host` link was never wired (or
+            // got nil'd). Re-link to the Member already representing
+            // us in this room rather than minting a duplicate.
+            existing.nick = prefs.nick
+            existing.isHost = true
+            existing.isAway = false
+            existing.awayReason = nil
+            existing.lastSeenAt = Date()
+            existing.session = session
+            session.host = existing
             me = existing
         } else {
-            // Defensive: file had a Session but no host link. Insert one
-            // with our current nick + flag so the room is consistent.
+            // Defensive: file had a Session but no host or self Member.
+            // Insert one with our current nick + flag so the room is
+            // consistent.
             let m = Member()
             m.nick = prefs.nick
+            m.userId = userId
             m.isHost = true
             m.session = session
             lattice.add(m)
@@ -560,6 +588,7 @@ public final class RoomsModel {
             roomCode: code,
             joinCode: joinCode,
             prefs: prefs)
+        instance.onKickedFromHost = makeKickedHandler()
         joinedRooms.append(instance)
         activeRoomId = instance.id
         return instance
@@ -582,6 +611,7 @@ public final class RoomsModel {
             roomCode: room.roomCode,
             joinCode: joinCode,
             prefs: prefs)
+        instance.onKickedFromHost = makeKickedHandler()
         joinedRooms.append(instance)
         activeRoomId = instance.id
         return instance
@@ -602,6 +632,24 @@ public final class RoomsModel {
             } else {
                 activeRoomId = joinedRooms.first?.id
             }
+        }
+    }
+
+    /// Closure handed to each peer `RoomInstance` so it can self-eject
+    /// when the host runs `/kick` on it. Tears the instance down via
+    /// `leave(_:)` first — that flips `activeRoomId` away from the
+    /// kicked room — and only then sets `pendingNotice`. If we wrote
+    /// the notice first, the view's drain would insert it as a system
+    /// message into the still-active kicked room's lattice, which
+    /// syncs the "you were kicked" line back to the host's chat
+    /// history (and any other peers).
+    private func makeKickedHandler() -> (UUID) async -> Void {
+        return { [weak self] roomId in
+            guard let self else { return }
+            let name = self.joinedRooms.first(where: { $0.id == roomId })?
+                .session?.name ?? "the room"
+            await self.leave(roomId)
+            self.pendingNotice = "you were kicked from \(name)"
         }
     }
 

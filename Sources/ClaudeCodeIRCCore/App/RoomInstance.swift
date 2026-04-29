@@ -111,14 +111,29 @@ public final class RoomInstance: Identifiable {
     public var scrollbackFloor: Date?
 
     private var catchUpTask: Task<Void, Never>?
-    /// Periodic `selfMember.lastSeenAt = Date()` ping. Quorum coordinators
-    /// filter members by `lastSeenAt` recency, so a member who stops
-    /// pinging (process killed, network dropped, laptop closed) is auto-
-    /// excluded from quorum after `Self.presenceThreshold`. Explicit
-    /// `/leave` deletes the row outright; the heartbeat is the safety net
-    /// for everything else. Cancelled in `leave()`.
-    private var heartbeatTask: Task<Void, Never>?
+    /// Off-`MainActor`. Pings `selfMember.lastSeenAt = Date()` every
+    /// `Self.heartbeatInterval` seconds so quorum coordinators (which
+    /// filter members by `lastSeenAt` recency) see this member as
+    /// present. A stopped heartbeat ages this member out of quorum
+    /// after `Self.presenceThreshold` and the host's sweeper flips
+    /// them to AFK. Explicit `/leave` deletes the row outright.
+    /// Stopped in `leave()`.
+    private var heartbeat: MemberHeartbeat?
+    /// Host-only, off-`MainActor`. Periodically marks stale members
+    /// (process killed, network dropped) as `isAway = true` so they
+    /// stop blocking quorum. Stopped in `leave()`.
+    private var presenceSweeper: MemberPresenceSweeper?
     private var chatObserver: AnyCancellable?
+    /// Host-only. Watches `Turn.cancelRequested` flips so anyone in
+    /// the room (including a peer that ESC'd, propagating via sync)
+    /// can interrupt the in-flight `claude` subprocess. Reset in
+    /// `leave()`.
+    private var cancelObserver: AnyCancellable?
+    /// Re-entrancy guard for the cancel handler — observer fires can
+    /// pile up while `driver.stop()` is in flight; without this, each
+    /// fire would write a duplicate "*** turn interrupted" system
+    /// message.
+    private var cancelInProgress: Bool = false
     /// Host-only. Lattice observers feeding `StatusLineDriver.nudge()`.
     /// One on Turn (status flips → assistant turn complete) and one on
     /// Session (permission-mode flips). Match the Claude Code spec's
@@ -137,6 +152,21 @@ public final class RoomInstance: Identifiable {
     /// `swap()` because Lattice observers are tied to a specific
     /// `Lattice` instance.
     private var publicURLObserver: PublicURLObserver?
+    /// Peer-only. Watches Member deletes — when our own `selfMember`
+    /// row vanishes from the synced state (host ran `/kick` on us),
+    /// we ourselves should auto-leave instead of leaving a stale UI
+    /// pointing at a dead Member. Cancelled in `leave()`.
+    private var selfMemberObserver: AnyCancellable?
+    /// Re-entrancy guard so two near-simultaneous Member.delete
+    /// observer fires don't both kick off `onKickedFromHost`.
+    private var kickInProgress: Bool = false
+    /// Wired by `RoomsModel` after the peer factory returns. Called
+    /// once on the MainActor when this instance detects its own
+    /// `selfMember` row was deleted from the synced state by the host
+    /// (i.e. a `/kick`). The handler is responsible for both posting
+    /// the user-facing system message and tearing the instance down
+    /// via `leave(_:)`. Held by reference; set to `nil` in `leave()`.
+    public var onKickedFromHost: ((UUID) async -> Void)?
 
     /// Opens a fresh peer-side `Lattice` against a new endpoint when
     /// `swap()` runs. Injected so tests substitute a path-controlled
@@ -183,7 +213,9 @@ public final class RoomInstance: Identifiable {
             joinedViaTunnel: false,
             peerLatticeStore: peerLatticeStore)
         instance.startChatObserver()
+        instance.startCancelObserver()
         instance.startHeartbeat()
+        instance.startPresenceSweeper()
         // No-op on host (observer guards isHost), but constructed so the
         // peer/host code paths stay symmetric.
         instance.publicURLObserver = PublicURLObserver(roomInstance: instance)
@@ -205,11 +237,13 @@ public final class RoomInstance: Identifiable {
         return instance
     }
 
-    /// Peer-side factory. Inserts the peer's own Member immediately
-    /// with an unset `session` link so the UI shows the correct nick
-    /// right away; the Session arrives asynchronously via sync
-    /// catch-up, at which point `startPeerCatchUp` backfills
-    /// `Member.session`.
+    /// Peer-side factory. Looks up an existing `Member` whose
+    /// `userId` matches `prefs.userId` (rejoin after a transient drop,
+    /// crash + relaunch, or swap) and reuses it — clearing `isAway`
+    /// from a host-set timeout, refreshing nick if `/nick`'d, bumping
+    /// `lastSeenAt`. Inserts a new Member only when no prior row
+    /// exists. The Session relationship arrives asynchronously via
+    /// sync catch-up; `startPeerCatchUp` backfills `Member.session`.
     public static func peer(
         lattice: Lattice,
         roomCode: String,
@@ -218,11 +252,25 @@ public final class RoomInstance: Identifiable {
         peerLatticeStore: any PeerLatticeStore = DefaultPeerLatticeStore()
     ) -> RoomInstance {
         Log.line("room-peer", "creating peer nick=\(prefs.nick) roomCode=\(roomCode)")
-        let me = Member()
-        me.nick = prefs.nick
-        me.isHost = false
-        lattice.add(me)
-        Log.line("room-peer", "inserted selfMember nick=\(me.nick)")
+        let userId = prefs.userId
+        let me: Member
+        if let existing = lattice.objects(Member.self)
+            .where({ $0.userId == userId })
+            .first {
+            existing.nick = prefs.nick
+            existing.isAway = false
+            existing.awayReason = nil
+            existing.lastSeenAt = Date()
+            me = existing
+            Log.line("room-peer", "reused existing selfMember nick=\(me.nick) userId=\(userId)")
+        } else {
+            me = Member()
+            me.nick = prefs.nick
+            me.userId = userId
+            me.isHost = false
+            lattice.add(me)
+            Log.line("room-peer", "inserted selfMember nick=\(me.nick) userId=\(userId)")
+        }
 
         // Tunnel peers join through `wss://`; LAN peers via `ws://`.
         // The scheme of the wssEndpoint baked into the lattice's
@@ -247,6 +295,7 @@ public final class RoomInstance: Identifiable {
             peerLatticeStore: peerLatticeStore)
         instance.startPeerCatchUp(roomCode: roomCode)
         instance.startHeartbeat()
+        instance.startSelfMemberObserver()
         instance.publicURLObserver = PublicURLObserver(roomInstance: instance)
         return instance
     }
@@ -319,10 +368,11 @@ public final class RoomInstance: Identifiable {
         selfMember?.session = session
     }
 
-    /// How often `heartbeatTask` writes `selfMember.lastSeenAt`. Members
-    /// whose `lastSeenAt` is older than `presenceThreshold` are excluded
-    /// from the quorum denominator — see `ApprovalVoteCoordinator` /
-    /// `AskVoteCoordinator`.
+    /// How often `MemberHeartbeat` writes `selfMember.lastSeenAt`.
+    /// Members whose `lastSeenAt` is older than `presenceThreshold`
+    /// are excluded from the quorum denominator — see
+    /// `ApprovalVoteCoordinator` / `AskVoteCoordinator`. Same value
+    /// is used as the sweeper cadence (`MemberPresenceSweeper`).
     static let heartbeatInterval: TimeInterval = 30
     /// Window after which an unheard-from member is treated as gone.
     /// Three missed heartbeats — large enough to ride out a brief
@@ -330,44 +380,110 @@ public final class RoomInstance: Identifiable {
     /// recovers in well under two minutes.
     static let presenceThreshold: TimeInterval = 90
 
-    /// Bumps `selfMember.lastSeenAt` every `heartbeatInterval` seconds.
-    /// The write itself synchronises like any other Member update —
-    /// peers re-evaluate their quorum tallies via the existing
-    /// `Member.update` observer in the coordinators, so other members
-    /// going stale gets noticed every time someone else heartbeats.
+    /// Constructs and starts the off-MainActor `MemberHeartbeat` keyed
+    /// to this instance's `selfMember.globalId`. Called from both
+    /// factories once `selfMember` is non-nil. The heartbeat actor
+    /// resolves its own `Lattice` handle via `sendableReference` so
+    /// the periodic write never touches the main thread; cross-
+    /// instance change observation (per Lattice's C++ layer) still
+    /// fires the MainActor-side `@LatticeQuery` / coordinator
+    /// observers naturally.
     private func startHeartbeat() {
-        guard heartbeatTask == nil else { return }
-        heartbeatTask = Task { [weak self] in
-            let nanos = UInt64(Self.heartbeatInterval * 1_000_000_000)
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: nanos)
-                if Task.isCancelled { return }
-                await MainActor.run {
-                    self?.selfMember?.lastSeenAt = Date()
-                }
+        guard heartbeat == nil,
+              let me = selfMember,
+              let id = me.globalId
+        else { return }
+        do {
+            let hb = try MemberHeartbeat(
+                latticeReference: lattice.sendableReference,
+                selfMemberGlobalId: id,
+                interval: Self.heartbeatInterval)
+            heartbeat = hb
+            Task { await hb.start() }
+        } catch {
+            Log.line("room", "heartbeat init failed: \(error)")
+        }
+    }
+
+    /// Host-only. Constructs and starts the off-MainActor
+    /// `MemberPresenceSweeper`. Called from the host factory only —
+    /// the host owns the canonical AFK write.
+    private func startPresenceSweeper() {
+        guard isHost,
+              presenceSweeper == nil,
+              let me = selfMember,
+              let id = me.globalId
+        else { return }
+        do {
+            let sw = try MemberPresenceSweeper(
+                latticeReference: lattice.sendableReference,
+                selfMemberGlobalId: id,
+                interval: Self.heartbeatInterval,
+                staleThreshold: Self.presenceThreshold)
+            presenceSweeper = sw
+            Task { await sw.start() }
+        } catch {
+            Log.line("room", "presence sweeper init failed: \(error)")
+        }
+    }
+
+    /// Peer-only. Lattice's `observe(Member.self)` fires on every
+    /// Member row delete (no per-row subscription API), so the
+    /// callback's job is to detect the one case that matters: our
+    /// own `selfMember` row was the deleted row — i.e. the host ran
+    /// `/kick` on us, and the delete just arrived via WS sync.
+    /// `ejectIfSelfDeleted` does the per-fire check + handoff.
+    private func startSelfMemberObserver() {
+        selfMemberObserver = lattice.observe(Member.self) {
+            @Sendable [weak self] change in
+            guard case .delete = change else { return }
+            Task { @MainActor [weak self] in
+                self?.ejectIfSelfDeleted()
             }
         }
     }
 
+    /// MainActor-side per-fire check: our own row gone? If so,
+    /// fire `onKickedFromHost` exactly once and clear the local
+    /// reference so subsequent UI reads + `leave()` teardown can't
+    /// touch a dead Member.
+    private func ejectIfSelfDeleted() {
+        guard !kickInProgress, !isHost else { return }
+        guard let me = selfMember, let id = me.globalId else { return }
+        guard lattice.object(Member.self, globalId: id) == nil else { return }
+        kickInProgress = true
+        let roomId = self.id
+        let handler = onKickedFromHost
+        selfMember = nil
+        Task { await handler?(roomId) }
+    }
+
     public func leave() async {
-        heartbeatTask?.cancel()
-        heartbeatTask = nil
+        if let heartbeat { await heartbeat.stop() }
+        heartbeat = nil
+        if let presenceSweeper { await presenceSweeper.stop() }
+        presenceSweeper = nil
+        selfMemberObserver?.cancel()
+        selfMemberObserver = nil
+        onKickedFromHost = nil
         // Persist the leave by removing our Member row before tearing
         // down the sync transport. The local audit log entry is
         // durable; on the host it propagates through the relay task
         // (which `server.stop()` drains below). On a peer it must
-        // ride out over WS — `awaitSyncFlush` polls until either
-        // there are no unsynced AuditLog rows or the bounded deadline
-        // elapses (we don't block leaving forever on a stuck network).
+        // ride out over WS — `awaitSyncFlush` watches Lattice's own
+        // `syncProgressStream` and returns either when `pendingUpload`
+        // hits zero or the bounded deadline elapses (we don't block
+        // leaving forever on a stuck network).
         if let me = selfMember {
             lattice.delete(me)
             selfMember = nil
         }
         if !isHost {
-            await awaitSyncFlush(deadline: 1.0)
+            await awaitSyncFlush(deadline: 1.5)
         }
         catchUpTask?.cancel()
         chatObserver?.cancel()
+        cancelObserver?.cancel()
         turnStatusObserver?.cancel()
         permissionModeObserver?.cancel()
         tunnelTask?.cancel()
@@ -381,16 +497,23 @@ public final class RoomInstance: Identifiable {
     }
 
     /// Best-effort wait for the local lattice to push pending writes
-    /// over WS. Polls `AuditLog.isSynchronized == false` count and
-    /// returns either when the queue empties or `deadline` seconds
-    /// elapse — bounded so a dropped network can't block the leave.
-    private func awaitSyncFlush(deadline: TimeInterval) async {
-        let end = Date().addingTimeInterval(deadline)
-        while Date() < end {
-            let pending = lattice.count(AuditLog.self,
-                                        where: { $0.isSynchronized == false })
-            if pending == 0 { return }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+    /// over WS. Subscribes to `Lattice.syncProgressStream` and returns
+    /// when `pendingUpload == 0` or the deadline elapses — bounded so
+    /// a dropped network can't block the leave indefinitely.
+    private func awaitSyncFlush(deadline seconds: TimeInterval) async {
+        let stream = lattice.syncProgressStream
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for await progress in stream {
+                    if progress.pendingUpload == 0 { return }
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            }
+            // Whichever finishes first wins; cancel the other.
+            await group.next()
+            group.cancelAll()
         }
     }
 
@@ -511,6 +634,48 @@ public final class RoomInstance: Identifiable {
         // Re-attach the publicURL observer to the new Lattice instance.
         // Old observer's AnyCancellable drops here.
         self.publicURLObserver = PublicURLObserver(roomInstance: self)
+    }
+
+    // MARK: - Host-side cancel observer
+
+    /// Host-only. Watches `Turn` rows for any flipping
+    /// `cancelRequested` to true while still streaming — that's the
+    /// signal (from a local ESC or a peer's ESC propagated via
+    /// Lattice sync) that someone wants to interrupt the in-flight
+    /// `claude` subprocess. Stopping the driver triggers the same
+    /// cleanup path used when claude exits naturally:
+    /// `closeTurnOnEof` flips `status` → `.errored`, pending
+    /// assistant text flushes, orphaned `AskQuestion` rows cancel.
+    ///
+    /// Wired only from the `host()` factory; `peer()` never calls
+    /// this. The internal guard is belt-and-suspenders for any
+    /// future caller that might mis-wire the peer path.
+    private func startCancelObserver() {
+        guard isHost, driver != nil else { return }
+        Log.line("room-host", "cancel observer starting room=\(self.roomCode)")
+        cancelObserver = lattice.observe(Turn.self) { @Sendable [weak self] change in
+            guard case .update = change else { return }
+            Task { @MainActor [weak self] in
+                await self?.checkCancelRequested()
+            }
+        }
+    }
+
+    private func checkCancelRequested() async {
+        guard isHost, !cancelInProgress, let driver else { return }
+        let target = lattice.objects(Turn.self)
+            .where { $0.status == .streaming && $0.cancelRequested == true }
+            .first
+        guard target != nil else { return }
+        cancelInProgress = true
+        Log.line("room-host", "cancel requested — stopping claude subprocess")
+        await driver.stop()
+        let m = ChatMessage()
+        m.kind = .system
+        m.text = "*** turn interrupted"
+        m.session = session
+        lattice.add(m)
+        cancelInProgress = false
     }
 
     // MARK: - Host-side chat observer → TurnManager

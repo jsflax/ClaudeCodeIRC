@@ -59,8 +59,14 @@ public final class AskVoteCoordinator {
     }
 
     private func reevaluatePending() {
+        // Quorum denominator: non-AFK, recently-heartbeated members.
+        // `RoomInstance` writes `lastSeenAt = Date()` every
+        // `heartbeatInterval` seconds; a stale row means the member's
+        // process is gone (killed, crashed, network dropped) and must
+        // not block quorum. `.count` resolves via SQL aggregate.
+        let staleCutoff = Date(timeIntervalSinceNow: -RoomInstance.presenceThreshold)
         let presentQuorum = lattice.objects(Member.self)
-            .where { !$0.isAway }
+            .where { !$0.isAway && $0.lastSeenAt > staleCutoff }
             .count
 
         // First pass: count completions across all pending rows so

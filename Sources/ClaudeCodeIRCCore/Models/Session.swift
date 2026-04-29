@@ -48,6 +48,15 @@ public final class Session {
     /// signal for tunnel-URL changes (cloudflared restart).
     public var publicURL: String? = nil
 
+    /// Latest stdout from the host's configured Claude Code statusLine
+    /// command (`~/.claude/settings.json` → `statusLine.command`),
+    /// captured by `StatusLineDriver` and synced to peers via Lattice.
+    /// May contain ANSI SGR escape sequences (rendered through
+    /// `Text(ansi:)` in `WorkspaceView`). Nil means the host has no
+    /// statusLine configured, or the command exited non-zero, or the
+    /// driver hasn't fired yet. Multi-line content is preserved verbatim.
+    public var hostStatusLine: String? = nil
+
     @Relation(link: \Member.session)
     public var members: any Results<Member>
 

@@ -105,6 +105,46 @@ import ClaudeCodeIRCCore
         #expect(ev.status == .errored)
     }
 
+    /// Regression: `claude -p`'s real wire format puts `tool_result`
+    /// blocks inside `type:"user"` events, not `type:"assistant"`. The
+    /// initial implementation only handled assistant-shape tool results
+    /// and silently ignored the user shape, so every Write/Edit/Bash
+    /// row stayed stuck at `.running` and the result-row UI never
+    /// drew. This test exercises the actual shape we see on disk in
+    /// `~/.claude/projects/<…>/<sessionId>.jsonl`.
+    @Test func userMessageToolResultClosesEvent() throws {
+        let (lattice, _, proc) = try makeProcessor()
+        var p = proc
+        p.openTurn(promptMessage: nil)
+        try p.handle(decode(#"""
+        {"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_3","name":"Write","input":{"file_path":"/tmp/x","content":"hi"}}]}}
+        """#))
+        try p.handle(decode(#"""
+        {"type":"user","message":{"role":"user","content":[{"tool_use_id":"tu_3","type":"tool_result","content":"File created successfully at: /tmp/x"}]}}
+        """#))
+        let ev = lattice.objects(ToolEvent.self).first!
+        #expect(ev.status == .ok)
+        #expect(ev.endedAt != nil)
+        #expect(ev.result == "File created successfully at: /tmp/x")
+    }
+
+    /// Plain user echo (claude bouncing back the prompt as a string)
+    /// must not be parsed as a tool result — that would explode on
+    /// the missing `type` field. Asserts the array gate still works.
+    @Test func userMessageStringContentIsIgnored() throws {
+        let (lattice, _, proc) = try makeProcessor()
+        var p = proc
+        p.openTurn(promptMessage: nil)
+        try p.handle(decode(#"""
+        {"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_4","name":"Bash","input":{}}]}}
+        """#))
+        try p.handle(decode(#"""
+        {"type":"user","message":{"role":"user","content":"alice: hello"}}
+        """#))
+        let ev = lattice.objects(ToolEvent.self).first!
+        #expect(ev.status == .running)  // unchanged — string content is no-op
+    }
+
     @Test func resultEventClosesTurnWithDone() throws {
         let (lattice, _, proc) = try makeProcessor()
         var p = proc

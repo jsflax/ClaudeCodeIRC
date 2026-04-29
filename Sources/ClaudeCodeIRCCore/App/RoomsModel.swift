@@ -324,6 +324,26 @@ public final class RoomsModel {
             directoryPublisher = nil
         }
 
+        // Statusline driver — only on the host, regardless of room
+        // visibility. The user's `~/.claude/settings.json` may opt out
+        // (no `statusLine` key); the driver itself short-circuits when
+        // no command is configured, so it's safe to construct
+        // unconditionally.
+        let sessionRef = session.sendableReference
+        let latticeRef = lattice.sendableReference
+        let statusLineDriver = StatusLineDriver(
+            context: .init(
+                cwd: session.cwd,
+                sessionId: session.claudeSessionId.uuidString,
+                sessionName: session.name,
+                appVersion: "0.0.1"),
+            onOutput: { @Sendable output in
+                guard let lattice = latticeRef.resolve(),
+                      let session = sessionRef.resolve(on: lattice)
+                else { return }
+                session.hostStatusLine = output
+            })
+
         let instance = RoomInstance.host(
             lattice: lattice,
             roomCode: roomCode,
@@ -336,7 +356,8 @@ public final class RoomsModel {
             turnManager: turnManager,
             prefs: prefs,
             tunnelManager: tunnelManager,
-            directoryPublisher: directoryPublisher)
+            directoryPublisher: directoryPublisher,
+            statusLineDriver: statusLineDriver)
         joinedRooms.append(instance)
         activeRoomId = instance.id
         return instance

@@ -60,10 +60,14 @@ public final class ApprovalVoteCoordinator {
     /// room can have thousands of decided approvals and hundreds of
     /// members, but the scan only touches the few pending rows.
     private func reevaluatePending() {
-        // Quorum denominator: non-AFK members. `.count` resolves via
-        // SQL aggregate, not a full row materialisation.
+        // Quorum denominator: non-AFK, recently-heartbeated members.
+        // `RoomInstance` writes `lastSeenAt = Date()` every
+        // `heartbeatInterval` seconds; a stale row means the member's
+        // process is gone (killed, crashed, network dropped) and must
+        // not block quorum. `.count` resolves via SQL aggregate.
+        let staleCutoff = Date(timeIntervalSinceNow: -RoomInstance.presenceThreshold)
         let presentQuorum = lattice.objects(Member.self)
-            .where { !$0.isAway }
+            .where { !$0.isAway && $0.lastSeenAt > staleCutoff }
             .count
 
         for req in lattice.objects(ApprovalRequest.self).where({ $0.status == .pending }) {

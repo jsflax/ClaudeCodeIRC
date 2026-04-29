@@ -70,8 +70,25 @@ package struct ClaudeEventProcessor {
         switch event {
         case .systemInit:
             break
-        case .user:
-            break  // claude echoes our own prompt back; ignore
+        case .user(let u):
+            // `claude -p`'s stream-json emits two flavours of user
+            // events: (a) an echo of the prompt we just sent — ignore,
+            // and (b) tool-result envelopes whose `message.content` is
+            // a JSON array of `{type:"tool_result", ...}` blocks. The
+            // latter are how a `ToolEvent` flips from `.running` →
+            // `.ok` / `.errored`. Without handling them, every tool
+            // row stays stuck at `.running` and never renders its
+            // result block. Echoed prompts are plain strings, not
+            // arrays — the array case below reads as a clean
+            // "is this a tool-result envelope" gate.
+            //
+            // The same envelope carries a richer `toolUseResult`
+            // sibling that we pass through so renderers can show a
+            // proper diff for Write/Edit overwrites (claude code
+            // pre-bakes `structuredPatch` + `originalFile` there).
+            if case .array(let elements) = u.message?.content {
+                handleUserToolResults(elements, toolUseResult: u.toolUseResult)
+            }
         case .assistant(let a):
             handleContent(a.message?.content ?? [])
         case .streamEvent(let e):
@@ -80,6 +97,45 @@ package struct ClaudeEventProcessor {
             finishTurn(result: r)
         case .unknown:
             break
+        }
+    }
+
+    /// Drain `tool_result` blocks out of a user message's content
+    /// array and route them through `closeToolEvent`. Pattern-matches
+    /// the `ContentValue` enum directly — no JSON re-encoding round
+    /// trip — so the field names stay grep-able and decoding stays
+    /// deterministic.
+    ///
+    /// `toolUseResult` is the sibling top-level envelope from the
+    /// same user message, when present. It carries claude code's
+    /// rich post-execution payload (e.g. `structuredPatch` for Edit
+    /// / Write overwrites). We pass its serialized JSON through to
+    /// `ToolEvent.resultMeta` so renderers can use the pre-baked
+    /// diff instead of reconstructing one from `input`.
+    private mutating func handleUserToolResults(
+        _ elements: [StreamJsonEvent.ContentValue],
+        toolUseResult: StreamJsonEvent.ContentValue?
+    ) {
+        for el in elements {
+            guard case .object(let fields) = el,
+                  case .string(let type) = fields["type"], type == "tool_result",
+                  case .string(let useId) = fields["tool_use_id"]
+            else { continue }
+            let isError: Bool
+            if case .bool(let b) = fields["is_error"] { isError = b } else { isError = false }
+            // `content` is usually a string but can be an array of
+            // sub-blocks (e.g. claude code wrapping the result with
+            // `[{type:"text", text:"…"}]`). `jsonString` handles both
+            // shapes uniformly — string passes through, structured
+            // values re-serialise to JSON.
+            let result = fields["content"]?.jsonString ?? ""
+            let metaJson: String?
+            if case .object = toolUseResult {
+                metaJson = toolUseResult?.jsonString
+            } else {
+                metaJson = nil
+            }
+            closeToolEvent(useId: useId, result: result, resultMeta: metaJson, isError: isError)
         }
     }
 
@@ -158,9 +214,15 @@ package struct ClaudeEventProcessor {
         toolEventsByUseId[useId] = ev
     }
 
-    private mutating func closeToolEvent(useId: String, result: String, isError: Bool) {
+    private mutating func closeToolEvent(
+        useId: String,
+        result: String,
+        resultMeta: String? = nil,
+        isError: Bool
+    ) {
         guard let ev = toolEventsByUseId[useId] else { return }
         ev.result = result
+        ev.resultMeta = resultMeta
         ev.status = isError ? .errored : .ok
         ev.endedAt = Date()
         toolEventsByUseId[useId] = nil

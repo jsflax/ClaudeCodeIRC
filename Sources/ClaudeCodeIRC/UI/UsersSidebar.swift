@@ -1,4 +1,5 @@
 import ClaudeCodeIRCCore
+import Foundation
 import class Lattice.TableResults
 import NCursesUI
 
@@ -9,15 +10,24 @@ import NCursesUI
 struct UsersSidebar: View {
     let room: RoomInstance
     let width: Int
+    /// True when this pane is the current Tab-focus target. Tints the
+    /// section header and surfaces the `▸ ` selection marker on
+    /// `selectedNick`'s row.
+    let paneFocused: Bool
+    /// `Member.globalId` of the row currently under the keyboard
+    /// cursor. Synthetic `@claude` is never selectable.
+    let selectedNick: UUID?
 
     @Query(sort: \Member.joinedAt) var members: TableResults<Member>
     @Environment(\.palette) var palette
+
+    private var headerColor: Color { paneFocused ? .cyan : .dim }
 
     var body: some View {
         let realMembers = Array(members)
         return VStack(spacing: 0) {
             Text(fillRule("users (\(realMembers.count + 1))", width: width))
-                .foregroundColor(.dim)
+                .foregroundColor(headerColor)
 
             // Synthetic claude entry. Both host and peers show this —
             // peers still address @claude, their messages sync to the
@@ -27,7 +37,8 @@ struct UsersSidebar: View {
                 nick: "claude",
                 isSelf: false,
                 isBot: true,
-                isAway: false)
+                isAway: false,
+                highlighted: false)
 
             ForEach(realMembers) { m in
                 UserRow(
@@ -35,7 +46,8 @@ struct UsersSidebar: View {
                     nick: m.nick,
                     isSelf: m.globalId == room.selfMember?.globalId,
                     isBot: false,
-                    isAway: m.isAway)
+                    isAway: m.isAway,
+                    highlighted: paneFocused && selectedNick == m.globalId)
             }
         }
     }
@@ -55,9 +67,11 @@ struct UserRow: View {
     let isSelf: Bool
     let isBot: Bool
     let isAway: Bool
+    let highlighted: Bool
 
     var body: some View {
-        var line = Text(mode).foregroundColor(.yellow)
+        var line = Text(highlighted ? "▸" : " ")
+        line = line + Text(mode).foregroundColor(.yellow)
         let nickColor: Color = isAway
             ? .dim
             : isBot
@@ -74,6 +88,6 @@ struct UserRow: View {
         if isBot {
             line = line + Text("  bot").foregroundColor(.dim)
         }
-        return line
+        return line.reverse(highlighted)
     }
 }

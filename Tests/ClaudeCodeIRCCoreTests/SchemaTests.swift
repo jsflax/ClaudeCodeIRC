@@ -95,4 +95,30 @@ private func makeTempLattice() throws -> Lattice {
         #expect(approval.toolEvent?.name == "Bash")
     }
 
+    @Test func sessionRoundTripsHostStatusLine() throws {
+        let lattice = try makeTempLattice()
+        let s = Session()
+        s.code = "statusline-test"
+        s.hostStatusLine = "model: claude · cwd: /tmp · turn 3"
+        lattice.add(s)
+
+        let read = lattice.objects(Session.self)
+            .first { $0.code == "statusline-test" }
+        #expect(read?.hostStatusLine == "model: claude · cwd: /tmp · turn 3")
+
+        // Multi-line + ANSI escapes survive intact (it's just a String;
+        // the renderer parses on display, the schema layer is byte-exact).
+        s.hostStatusLine = "\u{1B}[32mline 1\u{1B}[0m\nline 2"
+        let reread = lattice.objects(Session.self)
+            .first { $0.code == "statusline-test" }
+        #expect(reread?.hostStatusLine == "\u{1B}[32mline 1\u{1B}[0m\nline 2")
+
+        // Clearing back to nil is a normal flow (statusLine.command
+        // returned non-zero, or the user removed their config).
+        s.hostStatusLine = nil
+        let cleared = lattice.objects(Session.self)
+            .first { $0.code == "statusline-test" }
+        #expect(cleared?.hostStatusLine == nil)
+    }
+
 }

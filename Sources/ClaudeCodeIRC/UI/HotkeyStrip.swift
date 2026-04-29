@@ -11,7 +11,7 @@ struct HotkeyStrip: View {
         line = line + Text("^N/^P").foregroundColor(.yellow)
         line = line + Text(" next/prev ").foregroundColor(.dim)
         line = line + Text("Tab").foregroundColor(.yellow)
-        line = line + Text(" complete ").foregroundColor(.dim)
+        line = line + Text(" complete/pane ").foregroundColor(.dim)
         line = line + Text("/").foregroundColor(.yellow)
         line = line + Text(" command ").foregroundColor(.dim)
         line = line + Text("Y/A/D").foregroundColor(.yellow)

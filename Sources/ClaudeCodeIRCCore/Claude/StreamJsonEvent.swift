@@ -27,6 +27,14 @@ public enum StreamJsonEvent: Sendable, Decodable {
     public struct UserMessage: Decodable, Sendable {
         public let session_id: String?
         public let message: Envelope?
+        /// Sibling to `message`. When `message.content` carries a
+        /// `tool_result` block, `claude -p` also surfaces a richer
+        /// envelope here describing the tool's actual outcome — for
+        /// `Edit`/`Write`/`MultiEdit` it includes `structuredPatch`
+        /// (an array of `-old`/`+new` unified-diff lines) and
+        /// `originalFile`. We preserve the raw JSON here and let the
+        /// processor route it into `ToolEvent.resultMeta`.
+        public let toolUseResult: ContentValue?
 
         public struct Envelope: Decodable, Sendable {
             /// Content is usually an array of `{type:"text", text:"…"}`

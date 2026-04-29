@@ -64,6 +64,13 @@ public final class RoomInstance: Identifiable {
     /// it's safe to start immediately even before the tunnel has
     /// resolved its URL.
     public let directoryPublisher: DirectoryPublisher?
+    /// Host-only. Reads the user's Claude Code `statusLine` config,
+    /// runs the configured shell command on triggers (turn complete,
+    /// permission-mode change, optional refresh interval), and writes
+    /// stdout to `Session.hostStatusLine`. Peers see the value via
+    /// Lattice sync — only the host runs the driver. Nil when the
+    /// user hasn't configured a statusLine, or for peer instances.
+    public private(set) var statusLineDriver: StatusLineDriver?
     /// Host-only. The `claude` subprocess driver. Created eagerly at
     /// host() time; the TurnManager drives it. Peers talk to Claude
     /// via the host's Lattice rows — they have no local driver.
@@ -104,7 +111,21 @@ public final class RoomInstance: Identifiable {
     public var scrollbackFloor: Date?
 
     private var catchUpTask: Task<Void, Never>?
+    /// Periodic `selfMember.lastSeenAt = Date()` ping. Quorum coordinators
+    /// filter members by `lastSeenAt` recency, so a member who stops
+    /// pinging (process killed, network dropped, laptop closed) is auto-
+    /// excluded from quorum after `Self.presenceThreshold`. Explicit
+    /// `/leave` deletes the row outright; the heartbeat is the safety net
+    /// for everything else. Cancelled in `leave()`.
+    private var heartbeatTask: Task<Void, Never>?
     private var chatObserver: AnyCancellable?
+    /// Host-only. Lattice observers feeding `StatusLineDriver.nudge()`.
+    /// One on Turn (status flips → assistant turn complete) and one on
+    /// Session (permission-mode flips). Match the Claude Code spec's
+    /// event-driven trigger points. Reset in `leave()`.
+    private var turnStatusObserver: AnyCancellable?
+    private var permissionModeObserver: AnyCancellable?
+    private var lastObservedPermissionMode: PermissionMode?
     /// Host-only. Bridge task: starts the tunnel, waits for URLs, writes
     /// each new URL to `Session.publicURL`. Cancelled in `leave()`.
     private var tunnelTask: Task<Void, Never>?
@@ -142,6 +163,7 @@ public final class RoomInstance: Identifiable {
         prefs: AppPreferences,
         tunnelManager: TunnelManager? = nil,
         directoryPublisher: DirectoryPublisher? = nil,
+        statusLineDriver: StatusLineDriver? = nil,
         peerLatticeStore: any PeerLatticeStore = DefaultPeerLatticeStore()
     ) -> RoomInstance {
         let instance = RoomInstance(
@@ -161,6 +183,7 @@ public final class RoomInstance: Identifiable {
             joinedViaTunnel: false,
             peerLatticeStore: peerLatticeStore)
         instance.startChatObserver()
+        instance.startHeartbeat()
         // No-op on host (observer guards isHost), but constructed so the
         // peer/host code paths stay symmetric.
         instance.publicURLObserver = PublicURLObserver(roomInstance: instance)
@@ -173,6 +196,11 @@ public final class RoomInstance: Identifiable {
         // lands. No await needed; `start()` is fire-and-forget.
         if let directoryPublisher {
             Task { await directoryPublisher.start() }
+        }
+        if let statusLineDriver {
+            instance.statusLineDriver = statusLineDriver
+            Task { await statusLineDriver.start() }
+            instance.startStatusLineObservers()
         }
         return instance
     }
@@ -218,6 +246,7 @@ public final class RoomInstance: Identifiable {
             joinedViaTunnel: joinedViaTunnel,
             peerLatticeStore: peerLatticeStore)
         instance.startPeerCatchUp(roomCode: roomCode)
+        instance.startHeartbeat()
         instance.publicURLObserver = PublicURLObserver(roomInstance: instance)
         return instance
     }
@@ -290,16 +319,79 @@ public final class RoomInstance: Identifiable {
         selfMember?.session = session
     }
 
+    /// How often `heartbeatTask` writes `selfMember.lastSeenAt`. Members
+    /// whose `lastSeenAt` is older than `presenceThreshold` are excluded
+    /// from the quorum denominator — see `ApprovalVoteCoordinator` /
+    /// `AskVoteCoordinator`.
+    static let heartbeatInterval: TimeInterval = 30
+    /// Window after which an unheard-from member is treated as gone.
+    /// Three missed heartbeats — large enough to ride out a brief
+    /// network blip, small enough that a quorum stuck on a crashed peer
+    /// recovers in well under two minutes.
+    static let presenceThreshold: TimeInterval = 90
+
+    /// Bumps `selfMember.lastSeenAt` every `heartbeatInterval` seconds.
+    /// The write itself synchronises like any other Member update —
+    /// peers re-evaluate their quorum tallies via the existing
+    /// `Member.update` observer in the coordinators, so other members
+    /// going stale gets noticed every time someone else heartbeats.
+    private func startHeartbeat() {
+        guard heartbeatTask == nil else { return }
+        heartbeatTask = Task { [weak self] in
+            let nanos = UInt64(Self.heartbeatInterval * 1_000_000_000)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: nanos)
+                if Task.isCancelled { return }
+                await MainActor.run {
+                    self?.selfMember?.lastSeenAt = Date()
+                }
+            }
+        }
+    }
+
     public func leave() async {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        // Persist the leave by removing our Member row before tearing
+        // down the sync transport. The local audit log entry is
+        // durable; on the host it propagates through the relay task
+        // (which `server.stop()` drains below). On a peer it must
+        // ride out over WS — `awaitSyncFlush` polls until either
+        // there are no unsynced AuditLog rows or the bounded deadline
+        // elapses (we don't block leaving forever on a stuck network).
+        if let me = selfMember {
+            lattice.delete(me)
+            selfMember = nil
+        }
+        if !isHost {
+            await awaitSyncFlush(deadline: 1.0)
+        }
         catchUpTask?.cancel()
         chatObserver?.cancel()
+        turnStatusObserver?.cancel()
+        permissionModeObserver?.cancel()
         tunnelTask?.cancel()
         tunnelTask = nil
         if let directoryPublisher { await directoryPublisher.stop() }
         if let tunnelManager { await tunnelManager.stop() }
+        if let statusLineDriver { await statusLineDriver.stop() }
         if let driver { await driver.stop() }
         if let server { try? await server.stop() }
         publisher?.stop()
+    }
+
+    /// Best-effort wait for the local lattice to push pending writes
+    /// over WS. Polls `AuditLog.isSynchronized == false` count and
+    /// returns either when the queue empties or `deadline` seconds
+    /// elapse — bounded so a dropped network can't block the leave.
+    private func awaitSyncFlush(deadline: TimeInterval) async {
+        let end = Date().addingTimeInterval(deadline)
+        while Date() < end {
+            let pending = lattice.count(AuditLog.self,
+                                        where: { $0.isSynchronized == false })
+            if pending == 0 { return }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
     }
 
     /// Host-only. Kicks off `cloudflared` (asynchronously, may take 2–10s
@@ -445,5 +537,63 @@ public final class RoomInstance: Identifiable {
               let turnManager
         else { return }
         await turnManager.ingest(globalId: gid)
+    }
+
+    // MARK: - Host-side statusLine triggers
+
+    /// Host-only. Wires two Lattice observers — one on `Turn.status`
+    /// (assistant-turn complete) and one on `Session.permissionMode`
+    /// — to nudge `StatusLineDriver`. Mirrors Claude Code's event-
+    /// driven trigger spec; the driver itself debounces 300ms so
+    /// rapid bursts coalesce into a single command invocation.
+    ///
+    /// Permission-mode observation guards on a snapshot of the last-
+    /// seen value to avoid firing on every Session row insert/update
+    /// (most aren't mode changes — ChatMessage relations, publicURL,
+    /// etc. all flow through the same `observe(Session.self)` stream).
+    private func startStatusLineObservers() {
+        guard let driver = statusLineDriver else { return }
+        lastObservedPermissionMode = session?.permissionMode
+        Log.line("statusline-obs", "wired (Turn + Session) for room=\(self.roomCode)")
+
+        turnStatusObserver = lattice.observe(Turn.self) { @Sendable [weak self] change in
+            // Log every fire: bursts that flood ccirc.log indicate a
+            // runaway feedback loop. Pre-filter so only `.update`
+            // bursts surface — `.insert` for a new Turn isn't relevant
+            // to the nudge path.
+            Log.line("statusline-obs", "Turn fire change=\(change) room=\(self?.roomCode ?? "?" as String)")
+            guard case .update = change else { return }
+            Task { [weak self] in await self?.nudgeStatusLineIfTurnComplete(driver: driver) }
+        }
+
+        permissionModeObserver = lattice.observe(Session.self) { @Sendable [weak self] change in
+            // Same instrumentation rationale as above: this observer
+            // fires on every Session row mutation (publicURL,
+            // hostStatusLine writes, etc.) — the per-fire log makes
+            // self-induced loops obvious.
+            Log.line("statusline-obs", "Session fire change=\(change) room=\(self?.roomCode ?? "?" as String)")
+            switch change {
+            case .insert, .update: break
+            default: return
+            }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let mode = self.session?.permissionMode else { return }
+                if mode != self.lastObservedPermissionMode {
+                    Log.line("statusline-obs", "permissionMode \(self.lastObservedPermissionMode.map(String.init(describing:)) ?? "nil") → \(mode) — nudging")
+                    self.lastObservedPermissionMode = mode
+                    Task { await driver.nudge() }
+                }
+            }
+        }
+    }
+
+    private func nudgeStatusLineIfTurnComplete(driver: StatusLineDriver) async {
+        // Coarse trigger: any Turn row update fires `nudge()`. We could
+        // narrow to `.complete` transitions specifically, but the
+        // 300ms debounce in the driver makes the extra precision
+        // pointless and the simpler observer is easier to keep correct
+        // across schema additions.
+        await driver.nudge()
     }
 }

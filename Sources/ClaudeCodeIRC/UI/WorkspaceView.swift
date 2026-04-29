@@ -4,6 +4,11 @@ import struct Lattice.Lattice
 import class Lattice.TableResults
 import NCursesUI
 
+/// Tab-cycle stops in `WorkspaceView`. The center chat pane is
+/// intentionally not a focus stop — its scroll view already owns
+/// arrow keys, and Enter on chat has no row-level action.
+enum FocusedPane { case input, sessions, users }
+
 /// Root view of the app — the 3-column IRC-style layout the design
 /// handoff specifies. Shows joined + discovered sessions on the left,
 /// the active room's chat in the middle, the members of that room on
@@ -30,6 +35,25 @@ struct WorkspaceView: View {
     /// Highlighted slash-popup row — driven by ↑/↓, used by Tab / Enter
     /// to pick the selected command instead of always-the-first.
     @State private var slashSelection: String = ""
+
+    // MARK: - Pane focus
+    //
+    // Tab cycles the keyboard focus across input → sessions → users →
+    // input. While a sidebar is focused, ↑/↓ navigate row selection
+    // and Enter activates (joins / switches / reopens for sessions;
+    // no-op for users). The TextField defocuses while a sidebar is
+    // focused so the cursor stops blinking and other keys bubble.
+    //
+    // `focusedPane` is only consulted after the existing auto-defocus
+    // rules (form overlays, pending approval/AskQuestion + empty draft)
+    // have decided they don't want focus — those win at higher priority.
+    @State private var focusedPane: FocusedPane = .input
+    /// Selected row in the sessions sidebar. Cleared on `.input` and
+    /// re-seeded to the first visible row when focus enters `.sessions`.
+    @State private var sessionsSelection: SessionsSelection? = nil
+    /// `Member.globalId` of the highlighted users-sidebar row. Synthetic
+    /// `@claude` is never selectable.
+    @State private var usersSelection: UUID? = nil
 
     @Query(sort: \ApprovalRequest.requestedAt) var approvals: TableResults<ApprovalRequest>
     @Query(sort: \AskQuestion.requestedAt) var askQuestions: TableResults<AskQuestion>
@@ -130,24 +154,41 @@ struct WorkspaceView: View {
         let popupRows = slashPopupVisible
             ? (slashCompletions.count + 1)  // header + one per row
             : 0
+        // Host statusline: rendered when the active room's host has
+        // configured a `statusLine.command` and the driver has produced
+        // non-empty output (peers see this via Lattice sync). One line
+        // per `\n` in the captured stdout.
+        let statusLineText = model.activeRoom?.session?.hostStatusLine ?? ""
+        let statusLineRows = statusLineText.isEmpty
+            ? 0
+            : statusLineText.split(separator: "\n", omittingEmptySubsequences: false).count
         let chromeRows = 1 /* topbar */
             + 1 /* hline */
             + 1 /* status */
             + 1 /* input */
             + popupRows
+            + statusLineRows
             + 1 /* hotkey strip */
         let hstackHeight = max(5, Term.rows - chromeRows)
 
         return VStack(spacing: 0) {
             TopBar(model: model)
             HStack(spacing: 0) {
-                SessionsSidebar(model: model, width: leftWidth)
+                SessionsSidebar(
+                    model: model,
+                    width: leftWidth,
+                    paneFocused: focusedPane == .sessions,
+                    selectedRow: sessionsSelection)
                     .frame(width: leftWidth)
                 VLineView()
                 centerPane.frame(width: centerWidth)
                 VLineView()
                 if let room = model.activeRoom {
-                    UsersSidebar(room: room, width: rightWidth)
+                    UsersSidebar(
+                        room: room,
+                        width: rightWidth,
+                        paneFocused: focusedPane == .users,
+                        selectedNick: usersSelection)
                         .frame(width: rightWidth)
                 } else {
                     EmptyView().frame(width: rightWidth)
@@ -166,12 +207,28 @@ struct WorkspaceView: View {
                     completions: slashCompletions,
                     selection: $slashSelection)
             }
+            // Host statusline. The host's `StatusLineDriver` writes raw
+            // (possibly ANSI-coloured) stdout to `Session.hostStatusLine`
+            // and Lattice syncs it to peers; everyone renders the same
+            // string here. Multi-line preserved by splitting on `\n`.
+            if !statusLineText.isEmpty {
+                ForEach(Array(statusLineText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init).enumerated())) { (pair: (offset: Int, element: String)) in
+                    Text(ansi: pair.element)
+                }
+            }
             HotkeyStrip()
         }
         .onKeyPress(27 /* ESC */) {
-            // No-op at workspace level — HostForm/JoinForm own their
-            // own ESC bindings. Approval cards don't dismiss on ESC;
-            // Y/A/D are the explicit affirm/deny keys.
+            // Form overlays own their own ESC (they're rendered in an
+            // overlay layer that intercepts before this fires). Here
+            // ESC is the way out of a focused sidebar — return focus
+            // to input and clear the per-pane selection so the next
+            // Tab into a sidebar starts fresh at the first row.
+            if focusedPane != .input {
+                focusedPane = .input
+                sessionsSelection = nil
+                usersSelection = nil
+            }
         }
         // Ctrl+N / Ctrl+P cycle joined rooms. ASCII control codes —
         // 14 ("N"-64) and 16 ("P"-64). ncurses surfaces them as raw
@@ -244,6 +301,26 @@ struct WorkspaceView: View {
             askPendingBallot = []
             askActiveQuestionId = pendingAskQuestion?.globalId
         }
+        // Auto-seed sidebar selection when focus enters a sidebar.
+        // Picks the first visible row so the user doesn't have to
+        // press ↓ before Enter does anything.
+        .task(id: focusedPane) {
+            switch focusedPane {
+            case .sessions:
+                if sessionsSelection == nil {
+                    sessionsSelection = SessionsSidebar.flatRows(model: model).first
+                }
+            case .users:
+                if usersSelection == nil,
+                   let lattice = model.activeRoom?.lattice {
+                    let realMembers = Array(lattice.objects(Member.self)
+                        .sortedBy(SortDescriptor(\.joinedAt, order: .forward)))
+                    usersSelection = realMembers.first?.globalId
+                }
+            case .input:
+                break
+            }
+        }
     }
 
     // MARK: - Center pane
@@ -256,10 +333,25 @@ struct WorkspaceView: View {
                 onSubmit: send,
                 activeAskQuestionId: pendingAskQuestion?.globalId,
                 askFocusedRow: askFocusedRow,
-                askPendingBallot: askPendingBallot)
+                askPendingBallot: askPendingBallot,
+                extraChromeRows: extraChromeRows)
         } else {
             WelcomePane(pendingNewGroupInvite: pendingNewGroupInvite)
         }
+    }
+
+    /// Rows added on top of `RoomPane`'s baseline chrome budget. Slash
+    /// popup + host statusline are conditional and grow the chrome
+    /// dynamically; without telling `RoomPane`, its scroll budget
+    /// overshoots and trailing tool rows (e.g. `TodoWrite` checklists)
+    /// get pushed off the visible viewport.
+    private var extraChromeRows: Int {
+        let popup = slashPopupVisible ? (slashCompletions.count + 1) : 0
+        let statusLineText = model.activeRoom?.session?.hostStatusLine ?? ""
+        let statusLine = statusLineText.isEmpty
+            ? 0
+            : statusLineText.split(separator: "\n", omittingEmptySubsequences: false).count
+        return popup + statusLine
     }
 
     // MARK: - Status + input line
@@ -315,34 +407,63 @@ struct WorkspaceView: View {
                       onSubmit: send)
         }
         .onKeyPress(Int32(KEY_UP)) {
+            // Sidebar focus owns arrows when it has focus — without
+            // this branch, ↑ would also walk the slash popup or
+            // AskQuestion card, neither of which is what the user
+            // wants while sitting in a sidebar.
+            switch focusedPane {
+            case .sessions: moveSessionsSelection(-1); return
+            case .users:    moveUsersSelection(-1); return
+            case .input:    break
+            }
             if slashPopupVisible { moveSlashSelection(-1); return }
             if askCardActive { askMove(-1) }
         }
         .onKeyPress(Int32(KEY_DOWN)) {
+            switch focusedPane {
+            case .sessions: moveSessionsSelection(+1); return
+            case .users:    moveUsersSelection(+1); return
+            case .input:    break
+            }
             if slashPopupVisible { moveSlashSelection(+1); return }
             if askCardActive { askMove(+1) }
         }
-        // Enter — when the AskQuestion card is the focus and TextField
-        // is defocused, vote (single-select) or toggle (multi-select).
-        // Otherwise TextField's onSubmit handles it.
+        // Enter — when a sidebar pane has focus, activate its
+        // selected row (joins / switches / reopens for sessions; the
+        // users pane has no row action and falls through to no-op).
+        // When the AskQuestion card is the focus target and the
+        // TextField is defocused, vote / toggle. Otherwise
+        // TextField's onSubmit handles it.
         .onKeyPress(Int32(UInt8(ascii: "\n"))) {
+            switch focusedPane {
+            case .sessions:
+                activateSessionsSelection()
+                return
+            case .users:
+                // No row-level action yet for users — could insert
+                // `@nick ` into draft as a future enhancement. For
+                // now, swallowing the key would block the AskQuestion
+                // path and bubbling it would let the (defocused)
+                // TextField submit; explicit no-op + return keeps
+                // both off.
+                return
+            case .input:
+                break
+            }
             guard askCardActive else { return }
             askActivateFocusedRow()
-        }
-        // Tab — multi-select commit. Only fires when the card is the
-        // active focus; `handleTab()` (slash/nick complete) takes
-        // priority elsewhere via the dispatch order.
-        .onKeyPress(9 /* Tab */) {
-            if askCardActive, let q = pendingAskQuestion, q.multiSelect {
-                askCommitBallot()
-            }
         }
     }
 
     /// True when an AskQuestion card should receive arrow/Enter/Tab
     /// keypresses — same rule as the focus binding's "card route"
     /// branch (pending question + empty draft + no overlay open).
+    /// Requires `focusedPane == .input` so a user who Tab'd to a
+    /// sidebar can keep using arrows/Enter/Tab there even with an
+    /// AskQuestion pending — the ballot just stays uncommitted until
+    /// they Tab back to input.
     private var askCardActive: Bool {
+        guard focusedPane == .input else { return false }
         guard !hostFormVisible, !joinFormVisible, !addGroupVisible, !askOtherVisible else {
             return false
         }
@@ -363,8 +484,11 @@ struct WorkspaceView: View {
         //       through the option list.
         //   (d) the AskOtherInputOverlay is visible — it owns its
         //       own TextField focus.
+        //   (e) a sidebar pane is the active Tab focus — arrows
+        //       drive sidebar selection, Enter activates a row.
         Binding(
             get: {
+                if focusedPane != .input { return false }
                 if hostFormVisible || joinFormVisible || addGroupVisible { return false }
                 if askOtherVisible { return false }
                 if pendingApproval != nil && draft.isEmpty { return false }
@@ -400,16 +524,56 @@ struct WorkspaceView: View {
 
     // MARK: - Tab completion
 
-    /// Dispatch Tab to either slash-completion (when the draft starts
-    /// with a partial `/cmd`) or nick-completion (when the last word
-    /// of the draft is a partial nick). Both paths replace just the
-    /// incomplete fragment in `draft` in place.
+    /// Dispatch Tab. Order of precedence (top wins):
+    ///
+    ///   1. Slash popup visible → pick the highlighted command.
+    ///   2. AskQuestion card is the active focus + multi-select →
+    ///      commit the local pending ballot.
+    ///   3. Last word of `draft` is non-empty → nick-complete.
+    ///   4. Otherwise (empty draft, no AskQuestion ballot, no slash
+    ///      popup) → cycle the focused pane.
+    ///
+    /// Cases 1–3 mirror the prior behaviour; case 4 is the "context-
+    /// aware" pane navigator. Consolidated to a single Tab handler
+    /// because NCursesUI's child-first dispatch ALWAYS consumes a
+    /// child `.onKeyPress(9)` (the wrapper hard-returns true), so a
+    /// second handler at root level would be unreachable.
     private func handleTab() {
         if slashPopupVisible {
             completeSlash()
-        } else {
-            completeNick()
+            return
         }
+        if askCardActive, let q = pendingAskQuestion, q.multiSelect {
+            askCommitBallot()
+            return
+        }
+        let scalars = Array(draft)
+        var wordStart = scalars.count
+        while wordStart > 0, !scalars[wordStart - 1].isWhitespace {
+            wordStart -= 1
+        }
+        let lastWord = String(scalars[wordStart..<scalars.count])
+        if !lastWord.isEmpty {
+            completeNick()
+            return
+        }
+        cyclePane()
+    }
+
+    /// Move focus to the next pane in the cycle. Skips `.users` when
+    /// no room is active (the users sidebar renders as `EmptyView` in
+    /// that case, so focusing it would be a dead stop).
+    private func cyclePane() {
+        let next: FocusedPane
+        switch focusedPane {
+        case .input:
+            next = .sessions
+        case .sessions:
+            next = (model.activeRoom != nil) ? .users : .input
+        case .users:
+            next = .input
+        }
+        focusedPane = next
     }
 
     private func completeSlash() {
@@ -631,6 +795,18 @@ struct WorkspaceView: View {
                 room: currentRoom)
             return
         }
+        activateDiscovered(target, currentRoom: currentRoom)
+    }
+
+    /// Open a `DiscoveredRoom` — the only side-effect-bearing path
+    /// shared by `/join`, the LAN-discovered sidebar row, and the
+    /// directory-listed (public / group) sidebar rows. Honours
+    /// `requiresJoinCode` by popping the join overlay pre-populated;
+    /// open rooms join in place. Errors land on `currentRoom` if any.
+    private func activateDiscovered(
+        _ target: DiscoveredRoom,
+        currentRoom: RoomInstance?
+    ) {
         pendingJoin = target
         if target.requiresJoinCode {
             joinFormVisible = true
@@ -665,38 +841,47 @@ struct WorkspaceView: View {
         return out
     }
 
-    /// Resolve `/reopen [name]` against `model.recentLattices`. Reads
-    /// the persisted `Session` row from the matching Lattice to decide
-    /// whether to reopen as host (this user's nick == `Session.host?.nick`)
-    /// or peer (otherwise). Peer reopen requires a non-nil
-    /// `Session.publicURL` — without it we can't construct a wssEndpoint
-    /// (Bonjour rediscovery via the lobby is the alternative path).
+    /// Resolve `/reopen [name]` against `model.recentLattices` and
+    /// hand off to `activateRecent(code:)`. Errors / "no match" land
+    /// in `currentRoom` (or the log if the user ran this from the
+    /// welcome state).
     private func reopenRecent(nameFilter: String?, room currentRoom: RoomInstance?) {
         guard !model.recentLattices.isEmpty else {
             feedback("no recent rooms on disk", room: currentRoom)
             return
         }
         let filterLower = nameFilter?.lowercased()
-
-        // Helper: pull the Session out of an entry.
-        func session(for entry: (code: String, lattice: Lattice)) -> Session? {
-            entry.lattice.objects(Session.self).first(where: { $0.code == entry.code })
-        }
-
         let target = model.recentLattices.first { entry in
-            guard let s = session(for: entry) else { return false }
+            guard let s = entry.lattice.objects(Session.self)
+                .first(where: { $0.code == entry.code }) else { return false }
             guard let f = filterLower, !f.isEmpty else { return true }
             return s.name.lowercased().hasPrefix(f) || s.code.lowercased().hasPrefix(f)
         }
-        guard let target, let s = session(for: target) else {
+        guard let target else {
             feedback("no recent room matches '\(nameFilter ?? "")'", room: currentRoom)
             return
         }
+        activateRecent(code: target.code, currentRoom: currentRoom)
+    }
 
+    /// Reopen a recent room by code — host vs peer is decided by
+    /// reading the cached `Session.host.nick` against `prefs.nick`.
+    /// Peer reopen needs `Session.publicURL`; without it the user has
+    /// to rejoin via Bonjour / directory.
+    ///
+    /// Shared by `/reopen <name>` and the recent-row Enter activation.
+    private func activateRecent(code: String, currentRoom: RoomInstance?) {
+        guard let entry = model.recentLattices.first(where: { $0.code == code }),
+              let s = entry.lattice.objects(Session.self)
+                .first(where: { $0.code == code })
+        else {
+            feedback("recent room '\(code)' has no session row", room: currentRoom)
+            return
+        }
         let isHostRoom = (s.host?.nick == model.prefs.nick)
         if isHostRoom {
             Task {
-                do { _ = try await model.reopenAsHost(code: target.code) }
+                do { _ = try await model.reopenAsHost(code: code) }
                 catch { feedback("reopen as host failed: \(error)", room: currentRoom) }
             }
         } else {
@@ -707,13 +892,72 @@ struct WorkspaceView: View {
             }
             do {
                 _ = try model.reopenAsPeer(
-                    code: target.code,
+                    code: code,
                     wssEndpoint: url,
                     joinCode: s.joinCode)
             } catch {
                 feedback("reopen as peer failed: \(error)", room: currentRoom)
             }
         }
+    }
+
+    // MARK: - Sidebar pane navigation
+
+    /// Step the sessions-sidebar selection by ±1 across the flat row
+    /// list (joined → recent → LAN → public → groups, in render
+    /// order). Clamps at the boundaries — wrapping mid-list is jarring
+    /// because the sections look different and the user can lose
+    /// orientation.
+    private func moveSessionsSelection(_ delta: Int) {
+        let rows = SessionsSidebar.flatRows(model: model)
+        guard !rows.isEmpty else {
+            sessionsSelection = nil
+            return
+        }
+        let currentIdx = sessionsSelection.flatMap { rows.firstIndex(of: $0) } ?? -1
+        let next = max(0, min(rows.count - 1, currentIdx + delta))
+        sessionsSelection = rows[next]
+    }
+
+    /// Step the users-sidebar selection by ±1 across real members
+    /// (synthetic `@claude` is skipped — it has no `Member` row and
+    /// no row-level action).
+    private func moveUsersSelection(_ delta: Int) {
+        guard let lattice = model.activeRoom?.lattice else { return }
+        let realMembers = Array(lattice.objects(Member.self)
+            .sortedBy(SortDescriptor(\.joinedAt, order: .forward)))
+        guard !realMembers.isEmpty else { return }
+        let currentIdx = usersSelection.flatMap { id in
+            realMembers.firstIndex { $0.globalId == id }
+        } ?? -1
+        let next = max(0, min(realMembers.count - 1, currentIdx + delta))
+        usersSelection = realMembers[next].globalId
+    }
+
+    /// Enter on the sessions sidebar — dispatch by the row kind.
+    /// Joined rows switch the active room; everything else funnels
+    /// through `activateDiscovered` / `activateRecent` so the
+    /// behaviour matches the slash-command path. Returns focus to
+    /// `.input` after a successful dispatch so subsequent keystrokes
+    /// type into the message draft.
+    private func activateSessionsSelection() {
+        guard let sel = sessionsSelection else { return }
+        let here = model.activeRoom
+        switch sel {
+        case .joined(let id):
+            model.activate(id)
+        case .recent(let code):
+            activateRecent(code: code, currentRoom: here)
+        case .lan(let id):
+            guard let room = model.browser.rooms.first(where: { $0.id == id }) else { return }
+            activateDiscovered(room, currentRoom: here)
+        case .publicRoom(let roomId), .groupRoom(_, let roomId):
+            guard let room = directoryAsDiscoveredRooms()
+                .first(where: { $0.roomCode == roomId }) else { return }
+            activateDiscovered(room, currentRoom: here)
+        }
+        focusedPane = .input
+        sessionsSelection = nil
     }
 
     /// Surface a short informational line to the user. Emits a
@@ -1045,6 +1289,12 @@ struct RoomPane: View {
     let activeAskQuestionId: UUID?
     let askFocusedRow: Int
     let askPendingBallot: Set<String>
+    /// Rows the parent's chrome takes on top of `RoomPane`'s baseline
+    /// of 6. Slash popup + host statusline are the dynamic ones; both
+    /// live in `WorkspaceView` and need to be subtracted from the
+    /// scroll budget here so the bottom of our content (tool rows,
+    /// thinking strip, etc.) doesn't get pushed off-screen.
+    let extraChromeRows: Int
 
     @Query(sort: \Turn.startedAt) var turns: TableResults<Turn>
     /// Counted-only queries that drive the auto-scroll trigger. We
@@ -1067,31 +1317,19 @@ struct RoomPane: View {
         turns.first { $0.status == .streaming }
     }
 
-    /// True when claude is blocked waiting on a room decision —
-    /// pending approval or pending question. While true, the
-    /// thinking spinner reads as "doodling" but claude isn't
-    /// actually thinking; the subprocess is parked inside the MCP
-    /// shim's awaitDecision loop. Hide the spinner so the UI
-    /// doesn't lie about activity.
-    private var hasPendingDecision: Bool {
-        paneApprovals.contains { $0.status == .pending }
-            || paneAskQuestions.contains { $0.status == .pending }
-    }
-
-    /// Whether to show the thinking strip below the scrollback.
-    private var showThinkingView: Bool {
-        streamingTurn != nil && !hasPendingDecision
-    }
-
     /// ScrollView reserves the pane's full height minus the title
-    /// strip (1) and, when claude is streaming AND no decision is
-    /// pending, the thinking strip (1). Without shrinking here, the
-    /// ScrollView eats the pane and the ClaudeThinkingView gets 0
-    /// rows → invisible.
+    /// strip (1). The "claude is working" row is now a synthetic
+    /// chat event injected by `MessageListView` (see G4) instead of
+    /// a separate strip below the scroll, so we no longer subtract
+    /// a thinking-strip row here.
     private var scrollHeight: Int {
-        let paneHeight = Term.rows - 6 // chrome: topbar+hline+status+input+hotkey+pad
-        let thinking = showThinkingView ? 1 : 0
-        return max(1, paneHeight - 1 /* title strip */ - thinking)
+        // Baseline chrome: topbar + hline + status + input + hotkey + pad = 6.
+        // `extraChromeRows` covers conditional rows the parent owns
+        // (slash popup, host statusline) so the ScrollView shrinks in
+        // sync with the workspace's chrome calc and doesn't push our
+        // own trailing content off-screen.
+        let paneHeight = Term.rows - 6 - extraChromeRows
+        return max(1, paneHeight - 1 /* title strip */)
     }
 
     /// Sum of inserted rows that should drive auto-scroll-to-bottom.
@@ -1109,14 +1347,15 @@ struct RoomPane: View {
     var body: some View {
         VStack(spacing: 0) {
             titleStrip
-            ScrollView(height: scrollHeight, offset: $scrollOffset) {
+            ScrollView(height: scrollHeight, offset: $scrollOffset, interceptScrollKeys: true) {
                 MessageListView(
                     isHost: room.isHost,
                     scrollbackFloor: room.scrollbackFloor,
                     selfMember: room.selfMember,
                     activeAskQuestionId: activeAskQuestionId,
                     askFocusedRow: askFocusedRow,
-                    askPendingBallot: askPendingBallot)
+                    askPendingBallot: askPendingBallot,
+                    streamingTurn: streamingTurn)
             }
             // Auto-pin to bottom whenever a new scrollback row
             // inserts. ScrollView's afterChildren clamps `Int.max`
@@ -1127,9 +1366,6 @@ struct RoomPane: View {
             // scroll position" UX is a follow-up.
             .task(id: totalEventCount) {
                 scrollOffset = .max
-            }
-            if showThinkingView, let t = streamingTurn {
-                ClaudeThinkingView(turnId: t.globalId)
             }
         }
     }
@@ -1292,11 +1528,31 @@ struct HostFormOverlay: View {
         case .public_:         visibility = .public;  groupHashHex = nil
         case .group(let g):    visibility = .group;   groupHashHex = g.hashHex
         }
+        // Resolve cwd identically to `cwdBinding.getter` — the binding's
+        // setter only fires when the user actually types in the field,
+        // so a "open form, hit Enter on defaults" path leaves
+        // `prefs.lastCwd` empty even though the form rendered the fall-
+        // back. Without this, `Session.cwd` ends up "" and downstream
+        // (StatusLineDriver's transcript path lookup, claude -p's
+        // working directory) silently breaks.
+        //
+        // Also expand a leading `~` to `$HOME`. The user might type
+        // `~/Projects/foo`; `Process` doesn't expand tildes and
+        // Claude Code's transcript path encoding is `/`+`.` → `-` on
+        // an absolute path, so a literal `~` stays in the encoded
+        // segment (`--Projects-foo`) and `TranscriptReader` can't
+        // find the jsonl that actually lives at
+        // `-Users-…-Projects-foo`.
+        let stored = model.prefs.lastCwd
+        let raw = stored.isEmpty
+            ? FileManager.default.currentDirectoryPath
+            : stored
+        let resolvedCwd = (raw as NSString).expandingTildeInPath
         Task {
             do {
                 let room = try await model.host(
                     name: name.isEmpty ? "unnamed" : name,
-                    cwd: model.prefs.lastCwd,
+                    cwd: resolvedCwd,
                     mode: .default,
                     requireJoinCode: requireCode,
                     visibility: visibility,

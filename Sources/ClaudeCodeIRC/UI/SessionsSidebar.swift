@@ -1,4 +1,5 @@
 import ClaudeCodeIRCCore
+import Foundation
 import class Lattice.TableResults
 import NCursesUI
 
@@ -11,6 +12,19 @@ func fillRule(_ label: String, width: Int) -> String {
     let prefix = "── \(label) "
     let fill = max(0, width - prefix.count)
     return prefix + String(repeating: "─", count: fill)
+}
+
+/// Identifies any visible row in `SessionsSidebar` across its mixed
+/// sections (joined / recent / LAN / public / group). Used by
+/// `WorkspaceView`'s pane-focus navigation so ↑/↓ can step through
+/// rows without re-implementing the section structure, and Enter
+/// can dispatch per-case to the right activation helper.
+enum SessionsSelection: Hashable {
+    case joined(UUID)
+    case recent(String)
+    case lan(String)
+    case publicRoom(String)
+    case groupRoom(groupHashHex: String, roomId: String)
 }
 
 /// Left column of the workspace. Shows two groups:
@@ -28,6 +42,14 @@ struct SessionsSidebar: View {
     /// divider-fill length so the `── label ────` rule spans the full
     /// sidebar instead of a fixed dash count.
     let width: Int
+    /// True when this pane is the current Tab-focus target. Section
+    /// headers brighten and the row matching `selectedRow` gets the
+    /// `▸ ` prefix + reverse-video.
+    let paneFocused: Bool
+    /// Currently-highlighted row inside this sidebar. Ignored when
+    /// `paneFocused` is false (the marker is hidden so users aren't
+    /// confused about whether arrow keys are routing here).
+    let selectedRow: SessionsSelection?
     @Environment(\.palette) var palette
 
     /// Rooms the browser found on the LAN that we haven't already
@@ -49,16 +71,20 @@ struct SessionsSidebar: View {
         return rooms.filter { !joinedCodes.contains($0.roomId) }
     }
 
+    private var headerColor: Color { paneFocused ? .cyan : .dim }
+
     var body: some View {
         VStack(spacing: 0) {
             Text(fillRule("sessions (\(model.joinedRooms.count))", width: width))
-                .foregroundColor(.dim)
+                .foregroundColor(headerColor)
 
             ForEach(Array(model.joinedRooms.indices)) { idx in
                 SessionRow(
                     idx: idx + 1,
                     room: model.joinedRooms[idx],
-                    active: model.joinedRooms[idx].id == model.activeRoomId)
+                    active: model.joinedRooms[idx].id == model.activeRoomId,
+                    highlighted: paneFocused
+                        && selectedRow == .joined(model.joinedRooms[idx].id))
             }
 
             // Recent: persisted rooms we're not currently in. Each row
@@ -68,18 +94,22 @@ struct SessionsSidebar: View {
             if !model.recentLattices.isEmpty {
                 SpacerView(1)
                 Text(fillRule("recent (\(model.recentLattices.count))", width: width))
-                    .foregroundColor(.dim)
+                    .foregroundColor(headerColor)
                 ForEach(Array(model.recentLattices.indices)) { idx in
                     let entry = model.recentLattices[idx]
-                    RecentRoomRow(code: entry.code)
+                    RecentRoomRow(
+                        code: entry.code,
+                        highlighted: paneFocused && selectedRow == .recent(entry.code))
                         .environment(\.lattice, entry.lattice)
                 }
             }
 
             SpacerView(1)
-            Text(fillRule("lan", width: width)).foregroundColor(.dim)
+            Text(fillRule("lan", width: width)).foregroundColor(headerColor)
             ForEach(discoveredUnjoined) { room in
-                DiscoveredRow(room: room)
+                DiscoveredRow(
+                    room: room,
+                    highlighted: paneFocused && selectedRow == .lan(room.id))
             }
 
             // Public bucket — directory rooms anyone can browse. Hidden
@@ -88,9 +118,11 @@ struct SessionsSidebar: View {
             if !publicRooms.isEmpty {
                 SpacerView(1)
                 Text(fillRule("public (\(publicRooms.count))", width: width))
-                    .foregroundColor(.dim)
+                    .foregroundColor(headerColor)
                 ForEach(publicRooms) { room in
-                    DirectoryRow(room: room)
+                    DirectoryRow(
+                        room: room,
+                        highlighted: paneFocused && selectedRow == .publicRoom(room.roomId))
                 }
             }
 
@@ -99,12 +131,52 @@ struct SessionsSidebar: View {
             // new invite (`/addgroup`) materialises a new section
             // without restart. Each section's contents come from
             // `directoryRoomsByGroup[group.hashHex]`.
-            GroupsSidebarSection(model: model, width: width, joinedCodes: joinedCodes)
+            GroupsSidebarSection(
+                model: model,
+                width: width,
+                joinedCodes: joinedCodes,
+                paneFocused: paneFocused,
+                selectedRow: selectedRow)
                 .environment(\.lattice, model.prefsLattice)
 
             SpacerView(1)
             Text("[+] /host   /reopen [name]   /addgroup").foregroundColor(.yellow)
         }
+    }
+
+    /// Visible rows in render order — joined → recent → LAN → public →
+    /// each group. Used by `WorkspaceView` for ↑/↓ pane navigation so
+    /// the keyboard cursor walks the same sequence the user sees.
+    /// Reads directly from `model` (and `model.prefsLattice` for
+    /// groups) — no `@Query` indirection needed.
+    static func flatRows(model: RoomsModel) -> [SessionsSelection] {
+        var rows: [SessionsSelection] = []
+        let joinedCodes = Set(model.joinedRooms.map(\.roomCode))
+
+        for room in model.joinedRooms {
+            rows.append(.joined(room.id))
+        }
+        for entry in model.recentLattices {
+            rows.append(.recent(entry.code))
+        }
+        for room in model.browser.rooms where !joinedCodes.contains(room.roomCode) {
+            rows.append(.lan(room.id))
+        }
+        let publics = (model.directoryRoomsByGroup[GroupID.publicBucket] ?? [])
+            .filter { !joinedCodes.contains($0.roomId) }
+        for room in publics {
+            rows.append(.publicRoom(room.roomId))
+        }
+        let groups = Array(model.prefsLattice.objects(LocalGroup.self)
+            .sortedBy(SortDescriptor(\.addedAt, order: .forward)))
+        for group in groups {
+            let groupRooms = (model.directoryRoomsByGroup[group.hashHex] ?? [])
+                .filter { !joinedCodes.contains($0.roomId) }
+            for room in groupRooms {
+                rows.append(.groupRoom(groupHashHex: group.hashHex, roomId: room.roomId))
+            }
+        }
+        return rows
     }
 }
 
@@ -118,8 +190,12 @@ struct GroupsSidebarSection: View {
     let model: RoomsModel
     let width: Int
     let joinedCodes: Set<String>
+    let paneFocused: Bool
+    let selectedRow: SessionsSelection?
 
     @Query(sort: \LocalGroup.addedAt) var groups: TableResults<LocalGroup>
+
+    private var headerColor: Color { paneFocused ? .cyan : .dim }
 
     @ViewBuilder var body: some View {
         let groupArray = Array(groups)
@@ -131,7 +207,7 @@ struct GroupsSidebarSection: View {
             // noticed during early testing.
             VStack(spacing: 0) {
                 SpacerView(1)
-                Text(fillRule("groups", width: width)).foregroundColor(.dim)
+                Text(fillRule("groups", width: width)).foregroundColor(headerColor)
                 Text("  (none — /addgroup to paste invite)").foregroundColor(.dim)
                 Text("  (or /newgroup <name> to create one)").foregroundColor(.dim)
             }
@@ -146,9 +222,14 @@ struct GroupsSidebarSection: View {
                 VStack(spacing: 0) {
                     SpacerView(1)
                     Text(fillRule("\(group.name) (\(rooms.count))", width: width))
-                        .foregroundColor(.dim)
+                        .foregroundColor(headerColor)
                     ForEach(rooms) { room in
-                        DirectoryRow(room: room)
+                        DirectoryRow(
+                            room: room,
+                            highlighted: paneFocused
+                                && selectedRow == .groupRoom(
+                                    groupHashHex: group.hashHex,
+                                    roomId: room.roomId))
                     }
                 }
             }
@@ -163,13 +244,14 @@ struct GroupsSidebarSection: View {
 /// `wssURL` and treats it as a `DiscoveredRoom`).
 struct DirectoryRow: View {
     let room: DirectoryAPI.ListedRoom
+    let highlighted: Bool
 
     var body: some View {
-        var line = Text("  ")
+        var line = Text(highlighted ? "▸ " : "  ")
         line = line + Text(room.name).foregroundColor(.white)
         line = line + Text("  ").foregroundColor(.dim)
         line = line + Text("@\(room.hostHandle)").foregroundColor(.dim)
-        return line
+        return line.reverse(highlighted)
     }
 }
 
@@ -180,12 +262,13 @@ struct DirectoryRow: View {
 /// itself has no per-row click handler.
 struct RecentRoomRow: View {
     let code: String
+    let highlighted: Bool
 
     @Query var sessions: TableResults<Session>
 
     var body: some View {
         let session = Array(sessions).first(where: { $0.code == code })
-        var line = Text("  ")
+        var line = Text(highlighted ? "▸ " : "  ")
         line = line + Text(session?.name ?? code).foregroundColor(.white)
         if session?.joinCode != nil {
             line = line + Text(" 🔒").foregroundColor(.dim)
@@ -193,7 +276,7 @@ struct RecentRoomRow: View {
         if let v = session?.visibility, v != .private {
             line = line + Text("  \(v.rawValue)").foregroundColor(.dim)
         }
-        return line
+        return line.reverse(highlighted)
     }
 }
 
@@ -202,30 +285,33 @@ struct SessionRow: View {
     let idx: Int
     let room: RoomInstance
     let active: Bool
+    let highlighted: Bool
 
     var body: some View {
         let label = room.session?.name ?? room.roomCode
-        var line = Text("\(idx) ").foregroundColor(.dim)
+        var line = Text(highlighted ? "▸ " : "  ")
+        line = line + Text("\(idx) ").foregroundColor(.dim)
         line = line + Text(label)
         if room.joinCode != nil {
             line = line + Text(" 🔒").foregroundColor(.dim)
         }
-        return line.reverse(active)
+        return line.reverse(active || highlighted)
     }
 }
 
 /// A Bonjour-discovered row (not yet joined).
 struct DiscoveredRow: View {
     let room: DiscoveredRoom
+    let highlighted: Bool
 
     var body: some View {
-        var line = Text("  ")
+        var line = Text(highlighted ? "▸ " : "  ")
         line = line + Text(room.name).foregroundColor(.white)
         line = line + Text("  ").foregroundColor(.dim)
         line = line + Text(room.cwd).foregroundColor(.dim)
         if room.requiresJoinCode {
             line = line + Text(" 🔒").foregroundColor(.dim)
         }
-        return line
+        return line.reverse(highlighted)
     }
 }

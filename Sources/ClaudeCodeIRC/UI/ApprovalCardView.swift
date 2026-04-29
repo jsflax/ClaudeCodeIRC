@@ -52,6 +52,17 @@ struct ApprovalCardView: View {
     private var contentBody: some View {
         VStack(spacing: 0) {
             commandRow
+            // For Write / Edit / MultiEdit, the most useful thing to
+            // see at decision time is the actual change, not just the
+            // file path. Drop a unified-diff preview into the card so
+            // voters know what they're approving. Renderer is the
+            // same `DiffBlockView` body segments + tool result rows
+            // use, kept consistent via `ToolDiffPreview`.
+            if ToolDiffPreview.supportedTools.contains(request.toolName),
+               let parsed = ToolDiffPreview.parse(request.toolInput),
+               let patch = ToolDiffPreview.renderablePatch(parsed) {
+                DiffBlockView(file: parsed.path, patch: patch)
+            }
             tallyRow
         }
     }

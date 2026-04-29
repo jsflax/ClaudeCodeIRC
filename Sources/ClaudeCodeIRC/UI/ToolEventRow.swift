@@ -71,6 +71,15 @@ struct ToolEventRow: View {
                     SegmentView(segment: pair.segment)
                 }
             }
+        } else if ToolDiffPreview.supportedTools.contains(event.name) {
+            // Write / Edit / MultiEdit all share one rationale: the
+            // tool's `result` body is a one-line ack, but the
+            // semantically interesting payload is the bytes the tool
+            // changed. `ToolDiffPreview` normalises the three input
+            // shapes; `DiffBlockView` renders the synthesized patch
+            // (same component body segments use, so visual treatment
+            // stays consistent across surfaces).
+            diffPreviewBlock(mark: mark)
         } else {
             // Standard tool — single-line preview of result (or "—"
             // when no result text was returned, e.g. tools that
@@ -79,43 +88,114 @@ struct ToolEventRow: View {
         }
     }
 
-    /// Render TodoWrite's `input.todos: [{content, status, ...}]`
-    /// as a checklist. Status is one of `pending` / `in_progress`
-    /// / `completed`. Mirrors the official Claude Code todo strip
-    /// shape so the room can follow what claude is tracking.
+    /// Unified renderer for any tool whose semantically interesting
+    /// payload is "I changed bytes in this file" — Write (pure add),
+    /// Edit (one old/new), MultiEdit (many olds/news). Both the
+    /// parsing (`ToolDiffPreview.parse`) and the visual treatment
+    /// (`DiffBlockView`) are shared with `ApprovalCardView` so the
+    /// pre-decision and post-execution previews look identical.
     @ViewBuilder
-    private func todoListBlock(mark: String) -> some View {
-        let items = todoItems()
+    private func diffPreviewBlock(mark: String) -> some View {
+        // Pass `event.resultMeta` so a Write that overwrites an
+        // existing file picks up `toolUseResult.originalFile` and
+        // claude code's pre-baked `structuredPatch` (which carries
+        // context lines around the hunks, like claude code's own UI
+        // shows) instead of falling back to a context-less synthesized
+        // diff.
+        let parsed = ToolDiffPreview.parse(event.input, resultMeta: event.resultMeta)
+        let summary = parsed.map { ToolDiffPreview.summary(for: $0) } ?? "(empty)"
         VStack(spacing: 0) {
-            resultHeaderLine(
-                mark: mark,
-                body: items.isEmpty ? "(no todos)" : "\(items.count) item\(items.count == 1 ? "" : "s")")
-            ForEach(Array(items.enumerated())
-                .map { IndexedTodo(index: $0.offset, item: $0.element) }
-            ) { pair in
-                todoRow(pair.item)
+            resultHeaderLine(mark: mark, body: summary)
+            if let parsed, let patch = ToolDiffPreview.renderablePatch(parsed) {
+                DiffBlockView(file: parsed.path, patch: patch)
             }
         }
     }
 
-    private func todoRow(_ item: TodoItem) -> Text {
-        var line = Text("        ").paletteColor(.dim) // align under tool body
+    /// Render TodoWrite's `input.todos: [{content, status, ...}]`
+    /// as a checklist. Mirrors Claude Code's official rendering: a
+    /// leading `⎿` anchor on the first row and `◼`/`◻`/`✔` glyphs for
+    /// in-progress / pending / completed items. To keep the strip
+    /// readable on long-running tasks, completed items collapse — only
+    /// the most recent two are shown verbatim and the rest fold into a
+    /// trailing `… +N completed` summary row.
+    @ViewBuilder
+    private func todoListBlock(mark _: String) -> some View {
+        let items = todoItems()
+        let completedIndices = items.enumerated()
+            .filter { $0.element.status == "completed" }
+            .map { $0.offset }
+        // "Most recent" = last 2 completed in array order. Claude appends
+        // completed items after marking them done, so the suffix gives
+        // the user the freshest two.
+        let visibleCompleted = Set(completedIndices.suffix(2))
+        let collapsedCount = max(0, completedIndices.count - 2)
+
+        let visibleItems = items.enumerated().filter { offset, item in
+            switch item.status {
+            case "completed": return visibleCompleted.contains(offset)
+            default:          return true
+            }
+        }.map(\.element)
+
+        VStack(spacing: 0) {
+            // First row owns the ⎿ anchor + the first item (or a
+            // fallback message when the input had no items).
+            if let first = visibleItems.first {
+                todoRow(first, isAnchor: true)
+            } else {
+                anchorOnlyRow(label: collapsedCount > 0
+                    ? "… +\(collapsedCount) completed"
+                    : "(no todos)")
+            }
+            ForEach(Array(visibleItems.dropFirst().enumerated())
+                .map { IndexedTodo(index: $0.offset, item: $0.element) }
+            ) { pair in
+                todoRow(pair.item, isAnchor: false)
+            }
+            if !visibleItems.isEmpty, collapsedCount > 0 {
+                summaryRow(count: collapsedCount)
+            }
+        }
+    }
+
+    /// Indent + ⎿ for the anchor row; pure indent for follow-on rows so
+    /// glyphs line up vertically.
+    private static let todoAnchorIndent = "        ⎿  "
+    private static let todoBodyIndent   = "           "
+
+    private func todoRow(_ item: TodoItem, isAnchor: Bool) -> Text {
+        var line = Text(isAnchor ? Self.todoAnchorIndent : Self.todoBodyIndent)
+            .paletteColor(.dim)
         let glyph: String
         let glyphRole: Palette.Role
         switch item.status {
         case "completed":
-            glyph = "[x]"
+            glyph = "✔"
             glyphRole = .ok
         case "in_progress":
-            glyph = "[~]"
+            glyph = "◼"
             glyphRole = .accent
         default:
-            glyph = "[ ]"
+            glyph = "◻"
             glyphRole = .mute
         }
         line = line + Text("\(glyph) ").paletteColor(glyphRole)
+        // Completed text dims so the eye lands on in-progress / pending.
         let textRole: Palette.Role = item.status == "completed" ? .dim : .fg
         line = line + Text(item.content).paletteColor(textRole)
+        return line
+    }
+
+    private func anchorOnlyRow(label: String) -> Text {
+        var line = Text(Self.todoAnchorIndent).paletteColor(.dim)
+        line = line + Text(label).paletteColor(.dim)
+        return line
+    }
+
+    private func summaryRow(count: Int) -> Text {
+        var line = Text(Self.todoBodyIndent).paletteColor(.dim)
+        line = line + Text("… +\(count) completed").paletteColor(.dim)
         return line
     }
 

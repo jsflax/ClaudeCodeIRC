@@ -24,6 +24,12 @@ struct MessageListView: View {
     let activeAskQuestionId: UUID?
     let askFocusedRow: Int
     let askPendingBallot: Set<String>
+    /// Currently-streaming claude turn, if any. When non-nil and no
+    /// decision is pending, MessageListView injects a synthetic
+    /// `.thinking` event at the bottom of the scrollback so the user
+    /// sees a chat-shaped pending claude row (rather than a separate
+    /// strip below the ScrollView). Nil when no turn is in flight.
+    let streamingTurn: Turn?
 
     @Query(sort: \ChatMessage.createdAt) var messages: TableResults<ChatMessage>
     @Query(sort: \AssistantChunk.createdAt) var chunks: TableResults<AssistantChunk>
@@ -48,9 +54,35 @@ struct MessageListView: View {
                         selfMember: selfMember)
                 case .toolEvent(let t):
                     ToolEventRow(event: t)
+                case .thinking(let turnId, let startedAt, let tokensSoFar):
+                    ThinkingMessageRow(
+                        turnId: turnId,
+                        startedAt: startedAt,
+                        tokensSoFar: tokensSoFar)
                 }
             }
         }
+    }
+
+    /// True when claude is parked in `awaitDecision` — pending
+    /// approval or pending question. Suppresses the synthetic
+    /// thinking row so the UI doesn't lie about activity (the
+    /// approval / question card itself communicates the wait).
+    private var hasPendingDecision: Bool {
+        approvals.contains { $0.status == .pending }
+            || askQuestions.contains { $0.status == .pending }
+    }
+
+    /// Sum of streamed-chunk text length for the current turn,
+    /// converted to a rough token count (≈ 4 bytes/token for
+    /// English). nil-out for `streamingTurn == nil`.
+    private func streamingTokensSoFar() -> Int {
+        guard let turn = streamingTurn, let id = turn.globalId else { return 0 }
+        var bytes = 0
+        for c in chunks where c.turn?.globalId == id {
+            bytes += c.text.count
+        }
+        return bytes / 4
     }
 
     private var mergedEvents: [RoomEvent] {
@@ -65,10 +97,23 @@ struct MessageListView: View {
         let toolEventRows = toolEvents
             .filter { !$0.name.isEmpty }
             .map { RoomEvent.toolEvent($0) }
-        let merged = (chatEvents + chunkEvents + approvalEvents + askEvents + toolEventRows)
+        var merged = (chatEvents + chunkEvents + approvalEvents + askEvents + toolEventRows)
             .sorted { $0.timestamp < $1.timestamp }
-        guard let floor = scrollbackFloor else { return merged }
-        return merged.filter { $0.timestamp > floor }
+        if let floor = scrollbackFloor {
+            merged = merged.filter { $0.timestamp > floor }
+        }
+        // Append the thinking pseudo-event at the very end so it's
+        // always the last row in the scrollback while a turn is in
+        // flight. Use `.distantFuture`-ish ordering by simple append
+        // (post-sort) rather than threading a synthetic timestamp
+        // into the sort comparator.
+        if let turn = streamingTurn, !hasPendingDecision {
+            merged.append(.thinking(
+                turnId: turn.globalId,
+                startedAt: turn.startedAt,
+                tokensSoFar: streamingTokensSoFar()))
+        }
+        return merged
     }
 
     /// Sequential multi-question groups: only surface the first
@@ -103,6 +148,12 @@ enum RoomEvent: Identifiable {
     case approval(ApprovalRequest)
     case askQuestion(AskQuestion)
     case toolEvent(ToolEvent)
+    /// Synthetic, non-persisted "claude is working" row. Injected by
+    /// MessageListView at the bottom of the merged list while a Turn
+    /// is streaming so the spinner reads as the freshest event in
+    /// chat. Carries the turn's startedAt for the elapsed clock and
+    /// a rough running token count off accumulated chunks.
+    case thinking(turnId: UUID?, startedAt: Date, tokensSoFar: Int)
 
     var id: String {
         switch self {
@@ -111,6 +162,7 @@ enum RoomEvent: Identifiable {
         case .approval(let a):    return "a-\(a.globalId?.uuidString ?? "?")"
         case .askQuestion(let q): return "q-\(q.globalId?.uuidString ?? "?")"
         case .toolEvent(let t):   return "t-\(t.globalId?.uuidString ?? "?")"
+        case .thinking(let t, _, _): return "thinking-\(t?.uuidString ?? "current")"
         }
     }
 
@@ -121,6 +173,7 @@ enum RoomEvent: Identifiable {
         case .approval(let a):    return a.requestedAt
         case .askQuestion(let q): return q.requestedAt
         case .toolEvent(let t):   return t.startedAt
+        case .thinking(_, let s, _): return s
         }
     }
 }
@@ -151,6 +204,9 @@ struct MessageRow: View {
             // Routed to ToolEventRow in the parent; this branch only
             // fires if the parent forgot to special-case the enum.
             Text("[tool event]").foregroundColor(.dim)
+        case .thinking:
+            // Routed to ThinkingMessageRow in the parent.
+            Text("[thinking]").foregroundColor(.dim)
         }
     }
 
@@ -285,6 +341,65 @@ private struct IndexedSegment: Identifiable {
     let index: Int
     let segment: BodySegment
     var id: Int { index }
+}
+
+/// Inline "claude is working…" pending row. Same chat shape as a
+/// normal `<claude>` message — `HH:MM <claude> ✶ thinking… (Mm Ss · ↓ Nk tokens)`
+/// — so it sits naturally at the bottom of scrollback while a turn
+/// streams. The leading glyph cycles via the global `SpinnerTicker`,
+/// elapsed time recomputes on each tick, and the token count comes
+/// straight from accumulated `AssistantChunk` text so the row keeps
+/// updating without any extra observation plumbing.
+struct ThinkingMessageRow: View {
+    let turnId: UUID?
+    let startedAt: Date
+    let tokensSoFar: Int
+
+    var body: some View {
+        // Reading SpinnerTicker.frame inside the body registers with
+        // the observation tracker so each tick triggers a redraw.
+        let frame = SpinnerTicker.shared.frame
+        let glyph = Self.glyphs[frame % Self.glyphs.count]
+
+        let elapsed = max(0, Int(Date.now.timeIntervalSince(startedAt)))
+        let m = elapsed / 60
+        let s = elapsed % 60
+        let elapsedStr = "\(m)m \(s)s"
+
+        let tokenStr: String
+        if tokensSoFar >= 1000 {
+            tokenStr = "↓ \(tokensSoFar / 1000)k tokens"
+        } else if tokensSoFar > 0 {
+            tokenStr = "↓ \(tokensSoFar) tokens"
+        } else {
+            tokenStr = ""
+        }
+
+        // While no chunks have arrived, the row reads "thinking…";
+        // once tokens start streaming, drop the word and surface the
+        // running counter so the user sees progress instead of a
+        // stuck label.
+        let body = tokensSoFar > 0
+            ? "\(glyph) (\(elapsedStr) · \(tokenStr))"
+            : "\(glyph) thinking… (\(elapsedStr))"
+
+        let time = Self.timeString(startedAt)
+        var line = Text("\(time) ").foregroundColor(.dim)
+        line = line + Text("<@claude> ").foregroundColor(.yellow).bold()
+        line = line + Text(body).foregroundColor(.magenta)
+        return line
+    }
+
+    /// Six asterisk-ish glyphs the ticker rotates through. Mix of
+    /// 4- / 5- / 6-pointed stars so the rotation reads as a pulsing
+    /// point rather than a strict frame-by-frame progression.
+    private static let glyphs: [String] = ["✶", "✱", "✳", "✴", "✷", "✦"]
+
+    private static func timeString(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f.string(from: d)
+    }
 }
 
 /// Renders a single non-text BodySegment (code or diff) as its

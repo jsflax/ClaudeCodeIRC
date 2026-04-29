@@ -121,21 +121,35 @@ struct GroupsSidebarSection: View {
 
     @Query(sort: \LocalGroup.addedAt) var groups: TableResults<LocalGroup>
 
-    var body: some View {
+    @ViewBuilder var body: some View {
         let groupArray = Array(groups)
-        return ForEach(groupArray) { group in
-            let rooms = (model.directoryRoomsByGroup[group.hashHex] ?? [])
-                .filter { !joinedCodes.contains($0.roomId) }
-            // Always render the section header for a group the user
-            // joined — empty state is informative ("Canary (0)" tells
-            // them the group is being polled and just has no public
-            // rooms right now).
+        if groupArray.isEmpty {
+            // Empty state — surface the two ways to add a group right
+            // where the user is looking for them. Without this, /addgroup
+            // and /newgroup are only discoverable via the slash popup
+            // and the small footer line, neither of which the user
+            // noticed during early testing.
             VStack(spacing: 0) {
                 SpacerView(1)
-                Text(fillRule("\(group.name) (\(rooms.count))", width: width))
-                    .foregroundColor(.dim)
-                ForEach(rooms) { room in
-                    DirectoryRow(room: room)
+                Text(fillRule("groups", width: width)).foregroundColor(.dim)
+                Text("  (none — /addgroup to paste invite)").foregroundColor(.dim)
+                Text("  (or /newgroup <name> to create one)").foregroundColor(.dim)
+            }
+        } else {
+            ForEach(groupArray) { group in
+                let rooms = (model.directoryRoomsByGroup[group.hashHex] ?? [])
+                    .filter { !joinedCodes.contains($0.roomId) }
+                // Always render the section header for a group the user
+                // joined — empty state is informative ("Canary (0)" tells
+                // them the group is being polled and just has no public
+                // rooms right now).
+                VStack(spacing: 0) {
+                    SpacerView(1)
+                    Text(fillRule("\(group.name) (\(rooms.count))", width: width))
+                        .foregroundColor(.dim)
+                    ForEach(rooms) { room in
+                        DirectoryRow(room: room)
+                    }
                 }
             }
         }

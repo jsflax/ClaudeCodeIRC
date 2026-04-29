@@ -83,7 +83,12 @@ struct ClaudeCodeIRCApp: App {
     }
 
     var body: some Scene {
-        WindowServer {
+        // Opt out of ncurses mouse reporting so the terminal emulator
+        // keeps doing native click-and-drag selection. Wheel scroll
+        // still works because modern terminals translate it to arrow
+        // keys in altscreen with mouse reporting off, and ScrollView's
+        // KEY_UP/KEY_DOWN/KEY_PPAGE/KEY_NPAGE handlers consume those.
+        WindowServer(mouseReporting: false) {
             RootView()
         }
     }

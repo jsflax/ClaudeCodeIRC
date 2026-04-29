@@ -83,6 +83,14 @@ public enum InputRouter {
         /// paste itself.
         case addGroup
 
+        /// Create a brand-new local group with the given name and a
+        /// freshly-generated 32-byte secret. The handler computes the
+        /// `hashHex` (sha256 of the secret), inserts a `LocalGroup`
+        /// row in `prefs.lattice`, and emits the resulting invite code
+        /// (`ccirc-group:v1:<name>:<base64url(secret)>`) as a system
+        /// message in the lobby so the user can copy/share it.
+        case newGroup(String)
+
         /// Recognised slash prefix but unknown command — caller
         /// renders an error banner instead of treating as chat.
         case unknown(String)
@@ -156,6 +164,15 @@ public enum InputRouter {
             return .reopen(rest.isEmpty ? nil : rest)
         case "addgroup":
             return .addGroup
+        case "newgroup":
+            // Group name must be non-empty and contain no whitespace —
+            // it ends up in the invite code wire format and the
+            // sidebar section header.
+            guard !rest.isEmpty else { return .unknown("/newgroup needs a name") }
+            guard !rest.contains(where: { $0.isWhitespace }) else {
+                return .unknown("/newgroup name can't contain whitespace")
+            }
+            return .newGroup(rest)
         case "":
             // Bare "/" — treat as chat so users can type "/usr/bin"
             // without it disappearing into the parser.
@@ -180,6 +197,7 @@ public enum InputRouter {
         Command(name: "join",    usage: "/join [name]",    description: "join a discovered room (prefix match)"),
         Command(name: "reopen",  usage: "/reopen [name]",  description: "reopen a previously joined room from disk"),
         Command(name: "addgroup",usage: "/addgroup",       description: "add a group invite (opens form to paste)"),
+        Command(name: "newgroup",usage: "/newgroup <name>", description: "create a new group, prints invite to share"),
         Command(name: "nick",    usage: "/nick <name>",    description: "change your nickname"),
         Command(name: "members", usage: "/members",        description: "list members in this room"),
         Command(name: "side",    usage: "/side <msg>",     description: "banter excluded from Claude's context"),

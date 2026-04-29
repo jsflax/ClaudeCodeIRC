@@ -407,6 +407,48 @@ public final class RoomsModel {
         case sessionNotFound
     }
 
+    public enum CreateGroupError: Error, LocalizedError {
+        case nameAlreadyExists(String)
+        public var errorDescription: String? {
+            switch self {
+            case .nameAlreadyExists(let n): return "group '\(n)' already exists"
+            }
+        }
+    }
+
+    /// Generate a brand-new group: random 32-byte secret, computed
+    /// `hashHex`, persisted `LocalGroup` row, and a returned invite
+    /// code (`ccirc-group:v1:<name>:<base64url(secret)>`) the caller
+    /// can surface so the user shares it with peers.
+    ///
+    /// Throws `CreateGroupError.nameAlreadyExists` if a group with the
+    /// same `name` is already in `prefs.lattice` — silently colliding
+    /// would be confusing because the second `LocalGroup` would have
+    /// a different `hashHex` (different secret), so any directory
+    /// rooms already published under the first group's hash would
+    /// silently disappear from the sidebar.
+    @discardableResult
+    public func createGroup(name: String) throws -> (group: LocalGroup, invite: String) {
+        if prefsLattice.objects(LocalGroup.self).first(where: { $0.name == name }) != nil {
+            throw CreateGroupError.nameAlreadyExists(name)
+        }
+        // 32 bytes = 256-bit secret. `SystemRandomNumberGenerator` is
+        // cryptographically secure on Apple platforms (CSPRNG-backed),
+        // and `UInt8.random(using:)` reads from it.
+        var rng = SystemRandomNumberGenerator()
+        let secret = Data((0..<32).map { _ in UInt8.random(in: 0...255, using: &rng) })
+        let hash = GroupID.compute(secret: secret)
+        let g = LocalGroup()
+        g.hashHex = hash
+        g.name = name
+        g.secretBase64 = GroupInviteCode.base64URL(secret)
+        g.addedAt = Date()
+        prefsLattice.add(g)
+        let invite = GroupInviteCode.encode(name: name, secret: secret)
+        Log.line("rooms", "createGroup: name=\(name) hash=\(hash.prefix(8))…")
+        return (g, invite)
+    }
+
     /// Parse a `ccirc-group:v1:` paste, compute the directory bucket
     /// hash, and persist a `LocalGroup` row in `prefs.lattice`. Pasting
     /// the same invite twice is a no-op — the existing row is returned.

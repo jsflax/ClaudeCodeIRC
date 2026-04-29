@@ -95,4 +95,33 @@ import ClaudeCodeIRCCore
                 "no row should be inserted on malformed invite")
         }
     }
+
+    @Test func createGroupGeneratesSecretAndReturnsParseableInvite() async throws {
+        try await withTempDataDir {
+            let model = RoomsModel()
+            let result = try model.createGroup(name: "Canary")
+
+            #expect(result.group.name == "Canary")
+            #expect(!result.group.secretBase64.isEmpty)
+            #expect(model.prefsLattice.objects(LocalGroup.self).count == 1)
+
+            // The returned invite parses back to the same secret.
+            let decoded = try GroupInviteCode.decode(result.invite)
+            #expect(decoded.name == "Canary")
+            #expect(GroupID.compute(secret: decoded.secret) == result.group.hashHex)
+        }
+    }
+
+    @Test func createGroupRejectsDuplicateName() async throws {
+        try await withTempDataDir {
+            let model = RoomsModel()
+            _ = try model.createGroup(name: "Canary")
+
+            #expect(throws: RoomsModel.CreateGroupError.self) {
+                try model.createGroup(name: "Canary")
+            }
+            #expect(model.prefsLattice.objects(LocalGroup.self).count == 1,
+                "second /newgroup with same name must not insert a row")
+        }
+    }
 }

@@ -22,6 +22,11 @@ struct WorkspaceView: View {
     @State private var addGroupVisible: Bool = false
     @State private var pendingJoin: DiscoveredRoom?
     @State private var paletteSelectorVisible: Bool = false
+    /// Set after `/newgroup <name>` succeeds while no room is active —
+    /// the lobby welcome pane renders this as a copy-friendly banner so
+    /// the user can grab the invite. Cleared via Escape from the lobby
+    /// or by joining/hosting a room.
+    @State private var pendingNewGroupInvite: String?
     /// Highlighted slash-popup row — driven by ↑/↓, used by Tab / Enter
     /// to pick the selected command instead of always-the-first.
     @State private var slashSelection: String = ""
@@ -253,7 +258,7 @@ struct WorkspaceView: View {
                 askFocusedRow: askFocusedRow,
                 askPendingBallot: askPendingBallot)
         } else {
-            WelcomePane()
+            WelcomePane(pendingNewGroupInvite: pendingNewGroupInvite)
         }
     }
 
@@ -287,7 +292,8 @@ struct WorkspaceView: View {
             }
         }
         if mode != .default {
-            line = line + Text(" [\(mode.label)]").foregroundColor(Self.modeColor(mode))
+            line = line + Text(" \(Self.modePrefix(mode))\(mode.label)")
+                .foregroundColor(Self.modeColor(mode))
         }
         return line
     }
@@ -371,10 +377,24 @@ struct WorkspaceView: View {
     private static func modeColor(_ mode: PermissionMode) -> Color {
         switch mode {
         case .default:           return .dim
-        case .acceptEdits:       return .green
-        case .plan:              return .cyan
-        case .auto:              return .red
+        case .acceptEdits:       return .purple
+        case .plan:              return .teal
+        case .auto:              return .gold
         case .bypassPermissions: return .red
+        }
+    }
+
+    /// Visual glyph prefix that distinguishes elevated permission modes.
+    /// `⏵⏵` (double right-pointing) reads as "fast-forward / skip the
+    /// approval gate" — used for both acceptEdits and auto. `⏸` (pause)
+    /// reads as "no execution" — used for plan mode where Claude only
+    /// drafts. Default + bypass return empty (default needs no marker;
+    /// bypass already screams via the red colour).
+    private static func modePrefix(_ mode: PermissionMode) -> String {
+        switch mode {
+        case .acceptEdits, .auto: return "⏵⏵ "
+        case .plan:               return "⏸ "
+        case .default, .bypassPermissions: return ""
         }
     }
 
@@ -472,6 +492,9 @@ struct WorkspaceView: View {
         case .addGroup:
             addGroupVisible = true
             return
+        case .newGroup(let name):
+            handleNewGroup(name: name, room: model.activeRoom)
+            return
         case .palette:
             paletteSelectorVisible = true
             return
@@ -501,7 +524,7 @@ struct WorkspaceView: View {
         if let me = room.selfMember, me.isAway {
             switch intent {
             case .afk: break // explicit toggle — handled below
-            case .empty, .unknown, .leave, .clear, .palette, .host, .join, .reopen, .addGroup: break
+            case .empty, .unknown, .leave, .clear, .palette, .host, .join, .reopen, .addGroup, .newGroup: break
             default:
                 me.isAway = false
                 me.awayReason = nil
@@ -510,7 +533,7 @@ struct WorkspaceView: View {
         }
 
         switch intent {
-        case .empty, .host, .join, .reopen, .addGroup, .palette, .setNick:
+        case .empty, .host, .join, .reopen, .addGroup, .newGroup, .palette, .setNick:
             // Handled above — listed here only for the exhaustive
             // switch; shouldn't reach this branch.
             return
@@ -567,6 +590,8 @@ struct WorkspaceView: View {
             reopenRecent(nameFilter: filter, room: room)
         case .addGroup:
             addGroupVisible = true
+        case .newGroup(let name):
+            handleNewGroup(name: name, room: room)
         case .unknown(let reason):
             insertSystem(room: room, "error: \(reason)")
         }
@@ -719,6 +744,31 @@ struct WorkspaceView: View {
         msg.side = true
         msg.session = session
         room.lattice.add(msg)
+    }
+
+    /// Materialise a brand-new `LocalGroup` from `/newgroup <name>` and
+    /// surface its invite code so the user can copy/share it. When a
+    /// room is active the invite + name lands as a `.system` message
+    /// in that room's chat (peers will see it too — fine for a group
+    /// invite, the secret was generated locally and is meant to be
+    /// shared anyway). Otherwise we stash it on
+    /// `pendingNewGroupInvite`; the lobby welcome pane renders the
+    /// pending invite as a yellow banner.
+    private func handleNewGroup(name: String, room: RoomInstance?) {
+        let result: (group: LocalGroup, invite: String)
+        do {
+            result = try model.createGroup(name: name)
+        } catch {
+            let msg = error.localizedDescription
+            if let room { insertSystem(room: room, "error: \(msg)") }
+            return
+        }
+        let banner = "*** group \"\(result.group.name)\" created — share this invite:\n\(result.invite)"
+        if let room {
+            insertSystem(room: room, banner)
+        } else {
+            pendingNewGroupInvite = result.invite
+        }
     }
 
     /// Cast a vote as the active member on the oldest `.pending`
@@ -958,6 +1008,12 @@ extension InputRouter.Command: Identifiable {
 /// host a new one. The hotkey strip below this already advertises
 /// `/` for commands.
 struct WelcomePane: View {
+    /// Set when the user just ran `/newgroup <name>` while no room is
+    /// active — the resulting invite code is shown as a yellow banner
+    /// so they can copy/share it. Cleared by the workspace when the
+    /// user joins/hosts a room (or types `/clear`).
+    var pendingNewGroupInvite: String? = nil
+
     var body: some View {
         VStack {
             SpacerView(1)
@@ -967,6 +1023,11 @@ struct WelcomePane: View {
                 .foregroundColor(.dim)
             Text("claude only replies when addressed — use `@claude` anywhere in a message.")
                 .foregroundColor(.dim)
+            if let invite = pendingNewGroupInvite {
+                SpacerView(1)
+                Text("group created — share this invite:").foregroundColor(.dim)
+                Text(invite).foregroundColor(.yellow)
+            }
         }
     }
 }
@@ -1095,10 +1156,15 @@ struct HostFormOverlay: View {
 
     @State private var focus: HostFormFocus = .name
     @State private var name: String = ""
-    @State private var requireCode: Bool = true
-    /// Selected visibility choice. Index into `visibilityChoices`
-    /// (private + public + one entry per stored `LocalGroup`).
-    @State private var visibilityIndex: Int = 0
+    /// Default to "no join code" — the common case is a casual public
+    /// room shared with friends/teammates over the directory; requiring
+    /// a code is an opt-in extra step, not the default.
+    @State private var requireCode: Bool = false
+    /// Selected visibility choice. Index 1 = `.public_` in the cycler's
+    /// `[private, public, …groups]` order. Public is the default
+    /// because it's the case the directory + tunnel were built for;
+    /// users who want LAN-only flip to private.
+    @State private var visibilityIndex: Int = 1
     @State private var error: String = ""
 
     /// Available group rows from `prefs.lattice`. The cycler iterates
@@ -1110,9 +1176,19 @@ struct HostFormOverlay: View {
             .sortedBy(SortDescriptor(\.addedAt, order: .forward)))
     }
 
+    /// Edited cwd for this form. Seeded from `prefs.lastCwd` if the
+    /// user has hosted before, otherwise from the shell's pwd at app
+    /// launch — that's almost always the directory the user wants to
+    /// share. Empty `lastCwd` was the common first-launch case before
+    /// this fallback (form opened with a literal placeholder string,
+    /// which dropped the user into a typo trap).
     private var cwdBinding: Binding<String> {
         Binding(
-            get: { model.prefs.lastCwd },
+            get: {
+                let stored = model.prefs.lastCwd
+                if !stored.isEmpty { return stored }
+                return FileManager.default.currentDirectoryPath
+            },
             set: { model.prefs.lastCwd = $0 })
     }
     private var nameFocus: Binding<Bool> {

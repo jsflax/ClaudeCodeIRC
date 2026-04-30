@@ -595,12 +595,22 @@ public final class RoomsModel {
     }
 
     /// Join an existing room. `joinCode` is `nil` for open rooms.
+    ///
+    /// Drops any matching `recentLattices` entry FIRST so the same
+    /// on-disk file isn't held by two `Lattice` instances at once
+    /// (the idle "recent" handle vs the new peer-mode handle).
+    /// Without this, the recent's `Lattice` outlives the join, the
+    /// sidebar's `@Query`s still point at the recent's handle, and
+    /// any subsequent close/swap collapses both — `@Query`-driven
+    /// reads then SIGSEGV through a freed `db_`. Mirrors the
+    /// `reopenAsPeer` / `reopenAsHost` paths.
     @discardableResult
     public func join(
         _ room: DiscoveredRoom,
         joinCode: String?
     ) throws -> RoomInstance {
         Log.line("rooms", "join room=\(room.name) code=\(room.roomCode) ws=\(room.wsURL.absoluteString) auth=\(joinCode == nil ? "open" : "required")")
+        dropRecent(code: room.roomCode)
         let lattice = try RoomStore.openPeer(
             code: room.roomCode,
             endpoint: room.wsURL,
@@ -620,12 +630,19 @@ public final class RoomsModel {
     /// Leave a joined room. Stops its server / driver / publisher and
     /// removes it from the list. If it was active, activation shifts
     /// to the previous room (or `nil` if it was the last).
+    ///
+    /// Order matters: detach the view tree from the dying instance
+    /// **before** awaiting `instance.leave()`. The teardown deletes
+    /// the host's `selfMember` row (which on a single-host room is
+    /// also `session.host`) — and any active `RoomPane` reading
+    /// `room.session?.host?.nick` after that delete crashes on the
+    /// freed C++ string. Flipping `activeRoomId` and removing the
+    /// instance from `joinedRooms` synchronously unbinds the view
+    /// before the async tear-down runs.
     public func leave(_ roomId: UUID) async {
         guard let idx = joinedRooms.firstIndex(where: { $0.id == roomId })
         else { return }
-        let instance = joinedRooms[idx]
-        await instance.leave()
-        joinedRooms.remove(at: idx)
+        let instance = joinedRooms.remove(at: idx)
         if activeRoomId == roomId {
             if idx > 0 {
                 activeRoomId = joinedRooms[idx - 1].id
@@ -633,6 +650,7 @@ public final class RoomsModel {
                 activeRoomId = joinedRooms.first?.id
             }
         }
+        await instance.leave()
     }
 
     /// Closure handed to each peer `RoomInstance` so it can self-eject

@@ -36,23 +36,53 @@ package enum ClaudeUserConfig {
 
     /// Best-guess model id for the very first statusline render of a
     /// fresh session, when the transcript jsonl hasn't been written
-    /// yet. We can't know the model with certainty until claude
-    /// emits a `system_init` or assistant turn — but the user's
-    /// `~/.claude.json` records every model they've actually driven,
-    /// keyed by per-project `lastModelUsage` payloads. The variant
-    /// with the highest cumulative `outputTokens` is the one they
-    /// use most, so it's a sensible default to surface in the
-    /// statusline until the real value arrives.
+    /// yet. We pick the model id from the **most-recently-modified**
+    /// transcript jsonl across all `~/.claude/projects/`, which is a
+    /// solid proxy for "what the user actually last drove" — far more
+    /// useful than a cumulative-token heuristic that biases toward
+    /// historic favourites long after the user has moved on (e.g.
+    /// 1.2M tokens of legacy Opus 4.6 work outweighs 300k tokens of
+    /// fresh Opus 4.7 work even when the user is firmly on 4.7 now).
+    /// Returns `nil` when no transcripts exist at all.
     package static func mostRecentModelId() -> String? {
-        var best: (id: String, output: Int)?
-        for (id, payload) in everyLastModelUsage() {
-            let output = (payload as? [String: Any])
-                .flatMap { $0["outputTokens"] as? Int } ?? 0
-            if output > (best?.output ?? -1) {
-                best = (id, output)
+        let projectsDir = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: ".claude/projects")
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: projectsDir,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+        var best: (date: Date, url: URL)?
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            if mtime > (best?.date ?? .distantPast) {
+                best = (mtime, url)
             }
         }
-        return best?.id
+        guard let best else { return nil }
+        return latestAssistantModelId(in: best.url)
+    }
+
+    /// Tail the transcript jsonl, find the last `"type":"assistant"`
+    /// line, and return its `message.model` id. Best-effort: returns
+    /// `nil` for missing/unreadable files or transcripts containing
+    /// only user / system events.
+    private static func latestAssistantModelId(in url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8)
+        else { return nil }
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
+            guard let lineData = line.data(using: .utf8),
+                  let root = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  (root["type"] as? String) == "assistant",
+                  let message = root["message"] as? [String: Any],
+                  let modelId = message["model"] as? String
+            else { continue }
+            return modelId
+        }
+        return nil
     }
 
     /// Flatten every project's `lastModelUsage` map into a single

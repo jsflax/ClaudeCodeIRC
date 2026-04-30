@@ -31,11 +31,22 @@ public enum ModelRegistry {
     /// add it here when its concrete id becomes known (the API's
     /// Models endpoint is the source of truth — see freshness test).
     public static let known: [String: (displayName: String, contextWindow: Int)] = [
-        "claude-opus-4-7":           ("Opus 4.7",    200_000),
-        "claude-opus-4-7[1m]":       ("Opus 4.7 (1M context)", 1_000_000),
-        "claude-sonnet-4-6":         ("Sonnet 4.6",  200_000),
-        "claude-haiku-4-5":          ("Haiku 4.5",   200_000),
-        "claude-haiku-4-5-20251001": ("Haiku 4.5",   200_000),
+        "claude-opus-4-7":            ("Opus 4.7",    200_000),
+        "claude-opus-4-7[1m]":        ("Opus 4.7 (1M context)", 1_000_000),
+        // 4.6 family — still surfaces in older transcripts and is the
+        // model id baked into "Fast mode" sessions until they roll
+        // forward. Without these entries the statusline displays the
+        // raw id (e.g. "claude-opus-4-6[1m]") instead of a readable
+        // label.
+        "claude-opus-4-6":            ("Opus 4.6",    200_000),
+        "claude-opus-4-6[1m]":        ("Opus 4.6 (1M context)", 1_000_000),
+        "claude-sonnet-4-6":          ("Sonnet 4.6",  200_000),
+        "claude-sonnet-4-6[1m]":      ("Sonnet 4.6 (1M context)", 1_000_000),
+        // Older Opus 4.5 dated id occasionally shows up in long-lived
+        // resumed sessions — keep the friendly label for it too.
+        "claude-opus-4-5-20251101":   ("Opus 4.5",    200_000),
+        "claude-haiku-4-5":           ("Haiku 4.5",   200_000),
+        "claude-haiku-4-5-20251001":  ("Haiku 4.5",   200_000),
     ]
 
     /// Look up a model. Unknown ids fall back to forwarding the raw

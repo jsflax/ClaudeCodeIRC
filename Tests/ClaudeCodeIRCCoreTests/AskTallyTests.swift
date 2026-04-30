@@ -29,7 +29,7 @@ import ClaudeCodeIRCCore
     }
 
     @Test func singleSelectFirstToThresholdWins() {
-        // 3 present → threshold = 2. Label "a" gets 2; "b" gets 1.
+        // 3 present → threshold = 3/2 + 1 = 2. Label "a" gets 2; "b" gets 1.
         let r = AskTally.evaluate(
             ballots: [
                 ballot(["a"], 0),
@@ -43,7 +43,7 @@ import ClaudeCodeIRCCore
     }
 
     @Test func singleSelectQuorumOneSelfAnswers() {
-        // Quorum=1 → threshold=1. One ballot, one label, immediate win.
+        // Quorum=1 → threshold = 1/2 + 1 = 1. One ballot wins.
         let r = AskTally.evaluate(
             ballots: [ballot(["only"])],
             presentQuorum: 1,
@@ -53,32 +53,37 @@ import ClaudeCodeIRCCore
     }
 
     @Test func singleSelectTieBrokenByCastAt() {
-        // 4 present → threshold = 2. "a" hits 2 at t=2, "b" hits 2 at t=3.
-        // Earliest threshold-crossing wins → "a".
+        // 5 present → threshold = 5/2 + 1 = 3. "a" hits 3 at t=4,
+        // "b" hits 3 at t=5. Earliest threshold-crossing wins → "a".
         let r = AskTally.evaluate(
             ballots: [
                 ballot(["a"], 0),
                 ballot(["b"], 1),
                 ballot(["a"], 2),
                 ballot(["b"], 3),
+                ballot(["a"], 4),
+                ballot(["b"], 5),
             ],
-            presentQuorum: 4,
+            presentQuorum: 5,
             multiSelect: false)
         #expect(r.complete == true)
         #expect(r.chosenLabels == ["a"])
     }
 
     @Test func singleSelectLateTieDoesNotDethrone() {
-        // "a" hits threshold first at t=1; "b" catches up at t=2 to
-        // tie counts. Tally still picks "a" because it crossed first.
+        // 5 present → threshold 3. "a" hits 3 first at t=2; "b"
+        // catches up at t=5. Tally still picks "a" because it
+        // crossed threshold first.
         let r = AskTally.evaluate(
             ballots: [
                 ballot(["a"], 0),
                 ballot(["a"], 1),
-                ballot(["b"], 2),
+                ballot(["a"], 2),
                 ballot(["b"], 3),
+                ballot(["b"], 4),
+                ballot(["b"], 5),
             ],
-            presentQuorum: 4,
+            presentQuorum: 5,
             multiSelect: false)
         #expect(r.complete == true)
         #expect(r.chosenLabels == ["a"])

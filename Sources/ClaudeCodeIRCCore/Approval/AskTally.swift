@@ -8,9 +8,10 @@ import Lattice
 ///    fan out to N labels and count each independently.
 /// 2. **Termination differs by mode.**
 ///    - Single-select: as soon as any label crosses
-///      `threshold = ceil(presentQuorum / 2)`, that label wins. Ties
-///      at threshold broken by earliest `castAt` among tied labels'
-///      threshold-crossing ballots.
+///      `threshold = presentQuorum / 2 + 1` (strict majority — for
+///      n ≤ 2 that's unanimous, for n ≥ 3 simple majority), that
+///      label wins. Ties at threshold broken by earliest `castAt`
+///      among tied labels' threshold-crossing ballots.
 ///    - Multi-select: completes only when every present voter has
 ///      committed a ballot (`ballotCount == presentQuorum`). Winners
 ///      = every label whose count ≥ threshold (possibly empty if
@@ -68,7 +69,10 @@ public enum AskTally {
         multiSelect: Bool
     ) -> Result {
         precondition(presentQuorum >= 0)
-        let threshold = (presentQuorum + 1) / 2 // ceil(n / 2)
+        // Strict majority — see ApprovalTally for the rationale.
+        // For n=1,2 this is unanimous; for n≥3 it's simple majority.
+        // Ties stay `.pending`.
+        let threshold = presentQuorum / 2 + 1
 
         // Tally — dedupe within each ballot so listing the same label
         // twice can't double-count.

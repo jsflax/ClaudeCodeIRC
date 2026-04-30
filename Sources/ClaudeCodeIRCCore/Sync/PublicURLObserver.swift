@@ -36,9 +36,40 @@ public final class PublicURLObserver {
 
     public init(roomInstance: RoomInstance) {
         self.roomInstance = roomInstance
-        // Snapshot — see "Suppressing self-fire on attach" above.
-        self.lastObservedURL = roomInstance.session?.publicURL
+        // Baseline: prefer the URL we *actually connected with* over the
+        // (possibly nil) `session.publicURL` field. Catch-up populates
+        // `Session.publicURL` shortly after peer-join with the same
+        // tunnel origin we already dialed; comparing against the
+        // unconnected baseline (`nil`) would treat that as a "URL
+        // changed" event and trigger a redundant `swap()`. The swap
+        // closes the lattice we're mid-render against → SIGSEGV in
+        // `database::query` from the next `@Query` read. So seed the
+        // baseline with our own `wssEndpoint` re-translated to the
+        // host-written `https://*.trycloudflare.com` form (path
+        // stripped, scheme flipped); the first catch-up fire then
+        // matches and we skip the swap. Real tunnel rotations later
+        // *do* fire as intended.
+        self.lastObservedURL = Self.connectedHttpsOrigin(of: roomInstance.lattice)
+            ?? roomInstance.session?.publicURL
         attach(lattice: roomInstance.lattice)
+    }
+
+    /// Re-translate the lattice's bound `wssEndpoint`
+    /// (`wss://host/room/<code>`) back into the host-written
+    /// `https://host` form that `Session.publicURL` carries. Returns
+    /// `nil` if the lattice has no `wssEndpoint` (host-side instance,
+    /// or LAN-bonjour peer with a `ws://` URL we don't want to compare
+    /// against an https field anyway).
+    private static func connectedHttpsOrigin(of lattice: Lattice) -> String? {
+        guard let endpoint = lattice.configuration.wssEndpoint,
+              endpoint.scheme == "wss",
+              var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+        else { return nil }
+        components.scheme = "https"
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.url?.absoluteString
     }
 
     private func attach(lattice: Lattice) {

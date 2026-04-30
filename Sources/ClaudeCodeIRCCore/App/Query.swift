@@ -40,7 +40,21 @@ public struct Query<T: Model>: DynamicProperty {
         public var value: TableResults<T>
         public let predicate: Predicate<T>
         public let sort: SortDescriptor<T>?
-        public var lattice: Lattice?
+        /// Per-isolation handle. Holding `Lattice` directly here would
+        /// pin the *attaching* isolation's `swift_lattice` instance —
+        /// reads from any other isolation (e.g. the cooperative
+        /// `Task.detached` inside `Lattice.observe`) would then go
+        /// through the attaching instance, racing `swap()`/`leave()`
+        /// closes on `@MainActor`. `LatticeThreadSafeReference.resolve()`
+        /// keys on the *caller's* isolation — each call returns the
+        /// `Lattice` whose C++ `swift_lattice` is keyed to whoever's
+        /// reading right now. See `Tests/LatticeTests/ObserveCloseRaceTests`
+        /// in jsflax/lattice for the bare-Lattice repro.
+        public var latticeRef: LatticeThreadSafeReference?
+        /// Cached config used only for the bind-skip check (we want
+        /// the same `if config matches, no-op` shortcut without
+        /// resolving the ref every render).
+        private var lastBoundConfig: Lattice.Configuration?
         public var token: AnyCancellable?
 
         public init(predicate: @escaping Predicate<T>, sort: SortDescriptor<T>?) {
@@ -51,12 +65,13 @@ public struct Query<T: Model>: DynamicProperty {
 
         public func bind(_ lattice: Lattice) {
             let file = lattice.configuration.fileURL.lastPathComponent
-            guard self.lattice?.configuration != lattice.configuration else {
+            guard self.lastBoundConfig != lattice.configuration else {
                 Log.line("Query<\(T.self)>", "bind skipped (same cfg, file=\(file))")
                 return
             }
             Log.line("Query<\(T.self)>", "bind → \(file)")
-            self.lattice = lattice
+            self.lastBoundConfig = lattice.configuration
+            self.latticeRef = lattice.sendableReference
             fetch()
             let live = lattice.objects(T.self).where(predicate)
             self.token = live.observe { [weak self] (_: Any) in
@@ -65,9 +80,15 @@ public struct Query<T: Model>: DynamicProperty {
             }
         }
 
+        /// Resolve the Lattice for the *current* isolation and read
+        /// through it. `resolve()` returns a `Lattice` whose C++
+        /// `swift_lattice` instance is keyed by `(file, scheduler, …)`
+        /// — so a fetch on the cooperative `Task.detached` (observer
+        /// fire) goes through a different `db_` than `@MainActor`'s,
+        /// and an in-flight `lattice.close()` on main can't reach it.
         public func fetch() {
-            guard let lattice else {
-                Log.line("Query<\(T.self)>", "fetch skipped (no lattice)")
+            guard let lattice = latticeRef?.resolve() else {
+                Log.line("Query<\(T.self)>", "fetch skipped (no ref or unresolved)")
                 return
             }
             var results = lattice.objects(T.self).where(predicate)

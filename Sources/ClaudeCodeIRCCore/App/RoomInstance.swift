@@ -152,6 +152,13 @@ public final class RoomInstance: Identifiable {
     /// `swap()` because Lattice observers are tied to a specific
     /// `Lattice` instance.
     private var publicURLObserver: PublicURLObserver?
+    /// Peer-only. Owns the WebSocket reconnect timer + attempt counter
+    /// off-MainActor; the timer's `Task.sleep` runs on the monitor's
+    /// own actor isolation so it doesn't block UI ticks. `RoomInstance`
+    /// only re-arms it (after `peer()` and after each `swap()`) and
+    /// cancels it in `leave()`. Nil on host instances and on peers that
+    /// don't have a `wssEndpoint` (LAN-only without internet path).
+    private var reconnectMonitor: PeerReconnectMonitor?
     /// Peer-only. Watches Member deletes — when our own `selfMember`
     /// row vanishes from the synced state (host ran `/kick` on us),
     /// we ourselves should auto-leave instead of leaving a stale UI
@@ -297,6 +304,7 @@ public final class RoomInstance: Identifiable {
         instance.startHeartbeat()
         instance.startSelfMemberObserver()
         instance.publicURLObserver = PublicURLObserver(roomInstance: instance)
+        instance.installReconnectMonitor()
         return instance
     }
 
@@ -488,6 +496,14 @@ public final class RoomInstance: Identifiable {
         permissionModeObserver?.cancel()
         tunnelTask?.cancel()
         tunnelTask = nil
+        // Stop the reconnect monitor before tearing down the lattice
+        // so a state-change callback that fires during teardown finds
+        // a stale generation (cancel() bumps it) and bails instead of
+        // scheduling a fresh reconnect against a Lattice we're closing.
+        if let reconnectMonitor {
+            await reconnectMonitor.cancel()
+            self.reconnectMonitor = nil
+        }
         if let directoryPublisher { await directoryPublisher.stop() }
         if let tunnelManager { await tunnelManager.stop() }
         if let statusLineDriver { await statusLineDriver.stop() }
@@ -637,9 +653,55 @@ public final class RoomInstance: Identifiable {
         // Re-attach the publicURL observer to the new Lattice instance.
         // Old observer's AnyCancellable drops here.
         self.publicURLObserver = PublicURLObserver(roomInstance: self)
+        // Re-arm the reconnect monitor on the new Lattice. The OLD
+        // C++-side handler context was released when `lattice.close()`
+        // ran above, so any in-flight callback for the closed Lattice
+        // is gone; only the new one watches the new connection.
+        installReconnectMonitor()
         Log.line(
             "room-instance",
             "swap EXIT newLattice=\(newLattice.configuration.fileURL.lastPathComponent)")
+    }
+
+    // MARK: - Peer-side reconnect monitor
+
+    /// Peer-only. Lazily constructs `PeerReconnectMonitor` and
+    /// registers an `onSyncStateChange` callback on the current
+    /// (MainActor-resident) `Lattice`. The callback's only job is to
+    /// pump the bool into the monitor actor; the monitor owns the
+    /// timer, the attempt count, and the eventual hop back here for
+    /// `swap()`.
+    ///
+    /// Called once at peer creation and again after every `swap()`,
+    /// because each `swap()` produces a fresh Lattice with its own
+    /// C++ callback slot. The new callback is registered with a fresh
+    /// generation so any in-flight callback against the OLD Lattice
+    /// short-circuits on the monitor's generation check.
+    private func installReconnectMonitor() {
+        guard !isHost, let endpoint = lattice.configuration.wssEndpoint else { return }
+
+        // Lazy-construct so the monitor instance survives across
+        // `swap()` calls — same exp-backoff state machine, just
+        // re-armed against the fresh Lattice.
+        let monitor: PeerReconnectMonitor
+        if let existing = reconnectMonitor {
+            monitor = existing
+        } else {
+            monitor = PeerReconnectMonitor(owner: self, endpoint: endpoint, joinCode: joinCode)
+            reconnectMonitor = monitor
+        }
+
+        // Capture the MainActor lattice value so the registration call
+        // happens on the isolation that owns it. The callback's body is
+        // intentionally tiny: pump the bool into the monitor actor.
+        let lattice = self.lattice
+        let join = joinCode
+        Task { @MainActor in
+            let gen = await monitor.arm(endpoint: endpoint, joinCode: join)
+            lattice.onSyncStateChange { connected in
+                Task { await monitor.handleStateChange(connected: connected, gen: gen) }
+            }
+        }
     }
 
     // MARK: - Host-side cancel observer

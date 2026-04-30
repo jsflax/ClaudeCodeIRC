@@ -11,9 +11,11 @@ import NIOWebSocket
 ///   • On each binary upload frame, apply via `lattice.receive(...)`,
 ///     return an ack frame to the sender, and relay the original frame
 ///     bytes to the other connected peers in the room.
-///   • Respond to control frames: close, ping. No pong keepalive logic —
-///     NIO's `NIOWebSocketServerUpgrader` doesn't set one up by default,
-///     and for a LAN tool that's fine.
+///   • Respond to control frames: close, ping.
+///   • Send periodic ping frames to the peer to keep tunneled connections
+///     (cloudflared, ngrok, …) from being idled out. Free-tier
+///     `trycloudflare.com` closes silent WebSockets after ~9 seconds; a
+///     5-second cadence stays safely inside that.
 ///
 /// The handler captures a reference to the `RoomSyncServer` actor. All
 /// state mutations (peer registry) and Lattice calls hop onto the actor
@@ -32,6 +34,17 @@ final class RoomSyncConnectionHandler: ChannelInboundHandler {
     /// frames until `fin == true`.
     private var binaryBuffer: ByteBuffer?
 
+    /// Repeated server-initiated PING task. Started on `handlerAdded`,
+    /// cancelled on `channelInactive` / `handlerRemoved`. Lives on the
+    /// channel's event loop so all writes serialise correctly without
+    /// extra synchronisation.
+    private var keepaliveTask: RepeatedTask?
+
+    /// Interval between server-initiated PING frames. Chosen well inside
+    /// cloudflared's free-tier ~9s WebSocket idle timeout. Negligible
+    /// bandwidth (~4 bytes/s per peer).
+    private static let keepaliveInterval: TimeAmount = .seconds(5)
+
     init(server: RoomSyncServer, lastEventId: UUID?) {
         self.server = server
         self.lastEventId = lastEventId
@@ -49,12 +62,42 @@ final class RoomSyncConnectionHandler: ChannelInboundHandler {
         let server = self.server
         let checkpoint = self.lastEventId
         Task.detached { await connectionOpened(server: server, box: box, checkpoint: checkpoint) }
+        startKeepalive(context: context)
     }
 
     func channelInactive(context: ChannelHandlerContext) {
         let box = ChannelBox(channel: context.channel)
         let server = self.server
         Task.detached { await connectionClosed(server: server, box: box) }
+        stopKeepalive()
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        // Belt-and-suspenders: in some teardown paths the handler is
+        // removed without `channelInactive` having fired (e.g. the
+        // pipeline is dismantled before the channel goes inactive).
+        // Cancelling here too prevents a leaked timer holding a
+        // reference to the channel.
+        stopKeepalive()
+    }
+
+    // MARK: - Keepalive
+
+    private func startKeepalive(context: ChannelHandlerContext) {
+        let channel = context.channel
+        keepaliveTask = context.eventLoop.scheduleRepeatedTask(
+            initialDelay: Self.keepaliveInterval,
+            delay: Self.keepaliveInterval
+        ) { _ in
+            guard channel.isActive else { return }
+            let frame = WebSocketFrame(fin: true, opcode: .ping, data: ByteBuffer())
+            channel.writeAndFlush(frame, promise: nil)
+        }
+    }
+
+    private func stopKeepalive() {
+        keepaliveTask?.cancel(promise: nil)
+        keepaliveTask = nil
     }
 
     // MARK: - Frame dispatch

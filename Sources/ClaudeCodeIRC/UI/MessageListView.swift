@@ -1,6 +1,5 @@
 import ClaudeCodeIRCCore
 import Foundation
-import class Lattice.TableResults
 import NCursesUI
 
 /// Time-merged stream of user/system chat messages, assistant chunks,
@@ -31,11 +30,18 @@ struct MessageListView: View {
     /// strip below the ScrollView). Nil when no turn is in flight.
     let streamingTurn: Turn?
 
-    @Query(sort: \ChatMessage.createdAt) var messages: TableResults<ChatMessage>
-    @Query(sort: \AssistantChunk.createdAt) var chunks: TableResults<AssistantChunk>
-    @Query(sort: \ApprovalRequest.requestedAt) var approvals: TableResults<ApprovalRequest>
-    @Query(sort: \AskQuestion.requestedAt) var askQuestions: TableResults<AskQuestion>
-    @Query(sort: \ToolEvent.startedAt) var toolEvents: TableResults<ToolEvent>
+    // @Snapshot (not @Query) — `mergedEvents` calls `Collection.map` on each
+    // of these. `Collection.map` reads `count` once then iterates by index;
+    // `TableResults.count`/`endIndex` are live SQL queries. A streaming-chunk
+    // insert that lands mid-iteration shifts `endIndex`, the post-loop
+    // `_expectEnd` check trips, and the app SIGTRAPs in libswiftCore. The
+    // crash repros as "scroll while claude is thinking". @Snapshot exposes
+    // a stable `[T]` array that's race-free to map.
+    @Snapshot(sort: \ChatMessage.createdAt) var messages: [ChatMessage]
+    @Snapshot(sort: \AssistantChunk.createdAt) var chunks: [AssistantChunk]
+    @Snapshot(sort: \ApprovalRequest.requestedAt) var approvals: [ApprovalRequest]
+    @Snapshot(sort: \AskQuestion.requestedAt) var askQuestions: [AskQuestion]
+    @Snapshot(sort: \ToolEvent.startedAt) var toolEvents: [ToolEvent]
 
     var body: some View {
         VStack(spacing: 0) {

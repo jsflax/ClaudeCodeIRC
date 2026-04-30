@@ -131,9 +131,23 @@ struct ApprovalCardView: View {
 
     // MARK: - Tally helpers
 
+    /// Filter the top-level `@Query var allApprovalVotes` by this
+    /// request — does the same job as `request.votes` (the
+    /// `@Relation` backlink) but **reads** the `@Query` wrapper, so
+    /// NCursesUI's observation tracker subscribes the view to vote
+    /// inserts/updates. Reading the backlink alone doesn't subscribe
+    /// (the relation traversal returns rows but bypasses the
+    /// wrapper's `value` getter), so vote arrivals during the
+    /// pending phase didn't trigger a re-render — the count only
+    /// refreshed when `request.status` flipped at quorum.
+    private func votesForRequest() -> [ApprovalVote] {
+        guard let requestGid = request.globalId else { return [] }
+        return allApprovalVotes.filter { $0.request?.globalId == requestGid }
+    }
+
     private func voteBreakdown() -> (yes: [String], no: [String]) {
         var latest: [UUID: ApprovalVote] = [:]
-        for vote in request.votes {
+        for vote in votesForRequest() {
             guard let voterGid = vote.voter?.globalId else { continue }
             if let existing = latest[voterGid], existing.castAt > vote.castAt {
                 continue

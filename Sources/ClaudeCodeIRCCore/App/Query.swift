@@ -74,9 +74,25 @@ public struct Query<T: Model>: DynamicProperty {
             self.latticeRef = lattice.sendableReference
             fetch()
             let live = lattice.objects(T.self).where(predicate)
+            // Hop the observer's `fetch()` onto `@MainActor`. The
+            // cooperative `Task.detached` Lattice spawns for the
+            // observe dispatch is fine for *reading* (sendableReference
+            // gives us a per-isolation `swift_lattice` so `close()`
+            // on main can't tear it down — see lattice
+            // `ObserveCloseRaceTests`), but mutating `value` on a
+            // non-Main thread leaves NCursesUI's render loop without
+            // the @Observable invalidation it needs until some other
+            // MainActor event wakes it (e.g. an arrow key). With this
+            // hop, the value update lands on Main and the view
+            // re-renders immediately. The close-vs-fetch race is
+            // also gone: MainActor serialises both, so even if
+            // `close()` lands first the latticeRef.resolve in fetch
+            // returns a fresh isolation-keyed instance.
             self.token = live.observe { [weak self] (_: Any) in
                 Log.line("Query<\(T.self)>", "observe fired")
-                self?.fetch()
+                Task { @MainActor [weak self] in
+                    self?.fetch()
+                }
             }
         }
 

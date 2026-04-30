@@ -242,6 +242,20 @@ struct AskQuestionCardView: View {
 
     // MARK: - Tally helpers
 
+    /// Filter the top-level `@Query var allAskVotes` by this question
+    /// — does the same job as `question.votes` (the `@Relation`
+    /// backlink) but **reads** the `@Query` wrapper, so NCursesUI's
+    /// observation tracker subscribes the view to vote
+    /// inserts/updates. Reading the backlink alone doesn't subscribe
+    /// (the relation traversal returns rows but bypasses the
+    /// wrapper's `value` getter), so vote arrivals during the
+    /// pending phase didn't trigger a re-render — the count only
+    /// refreshed when the question terminated.
+    private func votesForQuestion() -> [AskVote] {
+        guard let qid = question.globalId else { return [] }
+        return allAskVotes.filter { $0.question?.globalId == qid }
+    }
+
     /// True when this client should render `[x]` for `label`. For
     /// multi-select pending-state, the local pendingBallot is the
     /// authoritative view (uncommitted toggles are visible only here).
@@ -250,7 +264,7 @@ struct AskQuestionCardView: View {
         if question.multiSelect, !pendingBallot.isEmpty {
             return pendingBallot.contains(label)
         }
-        for vote in question.votes where vote.voter?.globalId == selfGlobalId {
+        for vote in votesForQuestion() where vote.voter?.globalId == selfGlobalId {
             return vote.chosenLabels.contains(label)
         }
         return false
@@ -260,7 +274,7 @@ struct AskQuestionCardView: View {
 
     private func votersFor(label: String) -> [String] {
         var nicks: [String] = []
-        for vote in question.votes {
+        for vote in votesForQuestion() {
             guard let nick = vote.voter?.nick else { continue }
             if vote.chosenLabels.contains(label), !nicks.contains(nick) {
                 nicks.append(nick)
@@ -272,7 +286,7 @@ struct AskQuestionCardView: View {
 
     private func uniqueBallotVoters() -> Set<UUID> {
         var ids: Set<UUID> = []
-        for vote in question.votes {
+        for vote in votesForQuestion() {
             if let gid = vote.voter?.globalId { ids.insert(gid) }
         }
         return ids

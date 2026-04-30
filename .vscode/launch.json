@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:ClaudeCodeIRC}",
+            "name": "Debug claudecodeirc",
+            "target": "claudecodeirc",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug claudecodeirc"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:ClaudeCodeIRC}",
+            "name": "Release claudecodeirc",
+            "target": "claudecodeirc",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release claudecodeirc"
+        }
+    ]
+}

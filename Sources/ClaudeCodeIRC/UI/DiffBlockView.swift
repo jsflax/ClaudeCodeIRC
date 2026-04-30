@@ -21,10 +21,11 @@ struct DiffBlockView: View {
         let plus = rendered.lazy.filter { $0.kind == .added }.count
         let minus = rendered.lazy.filter { $0.kind == .removed }.count
         let gutter = max(2, String(rendered.map(\.lineNumber).max() ?? 0).count)
+        let language = languageSlug(forFilename: file)
         return VStack(spacing: 0) {
             header(plus: plus, minus: minus)
             ForEach(Array(rendered.indices)) { idx in
-                DiffLine(row: rendered[idx], gutter: gutter)
+                DiffRowView(row: rendered[idx], gutter: gutter, language: language)
             }
             footer
         }
@@ -146,29 +147,146 @@ private func parseHunkStarts(_ line: String) -> (Int, Int)? {
     return (minus, plus)
 }
 
-/// One row of the diff body: dim gutter (line number, right-aligned
-/// to a shared width) + body colored per row kind.
+/// Per-row dispatcher: added / removed rows go through `DiffLineView`
+/// (custom PrimitiveView with full-row bg fill + tokenized fg);
+/// context rows go through `DiffLine` with tokenized fg but no bg
+/// fill; hunk / meta rows keep the flat Text-based rendering.
+struct DiffRowView: View {
+    let row: DiffRow
+    let gutter: Int
+    let language: String
+
+    @ViewBuilder
+    var body: some View {
+        if row.kind == .added || row.kind == .removed {
+            DiffLineView(row: row, gutter: gutter, language: language)
+        } else {
+            DiffLine(row: row, gutter: gutter, language: language)
+        }
+    }
+}
+
+/// Context / hunk / meta row: dim gutter + body. Context rows are
+/// syntax-highlighted in the active palette's code-token colours
+/// (matches Claude Code's diff appearance — context lines aren't
+/// just monotone). Hunk headers stay cyan; meta lines stay dim.
 struct DiffLine: View {
     let row: DiffRow
     let gutter: Int
+    let language: String
 
     var body: some View {
-        let color: Color = {
-            switch row.kind {
-            case .added:    return .green
-            case .removed:  return .red
-            case .hunk:     return .cyan
-            case .meta:     return .dim
-            case .context:  return .white
-            }
-        }()
         let gutterText = row.lineNumber > 0
             ? String(row.lineNumber).padded(toLeadingWidth: gutter)
             : String(repeating: " ", count: gutter)
         var line = Text("│ ").foregroundColor(.dim)
         line = line + Text("\(gutterText)  ").foregroundColor(.dim)
-        line = line + Text(row.text).foregroundColor(color)
+
+        switch row.kind {
+        case .hunk:
+            line = line + Text(row.text).foregroundColor(.cyan)
+        case .meta:
+            line = line + Text(row.text).foregroundColor(.dim)
+        case .context:
+            // Context lines start with a leading space (the diff prefix)
+            // — render it as raw whitespace so columns align with
+            // added/removed rows, then tokenize the rest.
+            let body = row.text.hasPrefix(" ")
+                ? String(row.text.dropFirst())
+                : row.text
+            line = line + Text(" ").foregroundColor(.dim)
+            for token in SyntaxHighlighter.tokenize(body, language: language) {
+                line = line + Text(token.text).paletteColor(diffRoleFor(token.kind))
+            }
+        case .added, .removed:
+            // Unreachable via DiffRowView (those go through DiffLineView).
+            line = line + Text(row.text).foregroundColor(.white)
+        }
         return line
+    }
+}
+
+/// Map `SyntaxHighlighter` token kinds → palette code-token roles.
+/// Shared between `DiffLine` (context) and `DiffLineView` (add/remove)
+/// so all rows colour identically modulo the row background.
+fileprivate func diffRoleFor(_ kind: TokenKind) -> Palette.Role {
+    switch kind {
+    case .keyword:      return .codeKw
+    case .string:       return .codeStr
+    case .comment:      return .codeCom
+    case .number:       return .codeNum
+    case .identifier:   return .codeIdent
+    case .punctuation:  return .codePunct
+    case .whitespace:   return .codeIdent
+    case .diffAdd, .diffRemove, .diffHunk, .diffMeta:
+        return .codeIdent
+    }
+}
+
+/// Added / removed row: full-width diff-bg fill + dim gutter + bold
+/// glyph + syntax-highlighted body.
+///
+/// PrimitiveView (no `body`) so we can read `rect.width` at draw time
+/// and pin total run length to exactly that width. ≥2 runs guarantees
+/// `Text.draw` enters the multi-run fast path and skips wrap, so
+/// trailing padding spaces survive and bg-paint every cell across the
+/// row. Lines longer than the rect are truncated, not wrapped — same
+/// shape as Claude Code's diff renderer.
+struct DiffLineView: View, PrimitiveView {
+    typealias Body = Never
+    let row: DiffRow
+    let gutter: Int
+    let language: String
+
+    var body: Never { fatalError("DiffLineView has no body") }
+
+    func measure(children: [ViewNode], proposedWidth: Int) -> Size {
+        Size(width: proposedWidth, height: 1)
+    }
+
+    func draw(in rect: Rect) {
+        guard rect.width > 0, rect.height > 0 else { return }
+        let bg: Palette.DiffBg = row.kind == .added ? .add : .remove
+        let glyph = row.kind == .added ? "+" : "-"
+        let glyphRole: Palette.Role = row.kind == .added ? .ok : .danger
+
+        // Strip the leading +/- so we tokenize the actual code body.
+        let body = row.text.hasPrefix("+") || row.text.hasPrefix("-")
+            ? String(row.text.dropFirst())
+            : row.text
+
+        let gutterText = row.lineNumber > 0
+            ? String(row.lineNumber).padded(toLeadingWidth: gutter)
+            : String(repeating: " ", count: gutter)
+
+        // Build runs: frame `│ ` + gutter + space + bold glyph + space
+        // + tokenized body + trailing-pad spaces.
+        var line = Text("│ ").paletteColor(.dim, on: bg)
+        line = line + Text("\(gutterText) ").paletteColor(.dim, on: bg)
+        line = line + Text(glyph).paletteColor(glyphRole, on: bg).bold()
+        line = line + Text(" ").paletteColor(.fg, on: bg)
+
+        var consumed = 2 /* "│ " */ + gutterText.count + 1 /* sp */
+            + 1 /* glyph */ + 1 /* sp */
+
+        if consumed < rect.width {
+            for token in SyntaxHighlighter.tokenize(body, language: language) {
+                if consumed >= rect.width { break }
+                let remaining = rect.width - consumed
+                let text = token.text.count > remaining
+                    ? String(token.text.prefix(remaining))
+                    : token.text
+                line = line + Text(text).paletteColor(diffRoleFor(token.kind), on: bg)
+                consumed += text.count
+            }
+        }
+
+        if consumed < rect.width {
+            let pad = String(repeating: " ", count: rect.width - consumed)
+            line = line + Text(pad).paletteColor(.fg, on: bg)
+        }
+
+        line.draw(in: rect)
     }
 }
 

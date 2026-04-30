@@ -968,11 +968,26 @@ struct WorkspaceView: View {
     }
 
     /// Reopen a recent room by code — host vs peer is decided by
-    /// matching the cached `Session.host.userId` against `prefs.userId`.
-    /// `userId` is stable across `/nick` and across crashes; matching
-    /// against `nick` was brittle (collisions, renames). Peer reopen
-    /// needs `Session.publicURL`; without it the user has to rejoin
-    /// via Bonjour / directory.
+    /// looking up a `Member` row whose `userId == prefs.userId &&
+    /// isHost`. `userId` is stable across `/nick` and across crashes;
+    /// matching against `nick` was brittle (collisions, renames).
+    /// Peer reopen needs `Session.publicURL`; without it the user has
+    /// to rejoin via Bonjour / directory.
+    ///
+    /// Belt-and-suspenders: we deliberately don't dereference
+    /// `Session.host` here. Lattice files on disk that pre-date
+    /// LatticeCore@113fc8d (cascade-clean link & union tables on row
+    /// delete) can carry an orphaned `_Session_Member_host` row
+    /// pointing at a Member that has since been deleted — the cascade
+    /// loop in `lattice_db::remove` was incorrectly skipping every
+    /// link table, so the cleanup never ran or synced. Following such
+    /// an orphan via `s.host?` faults inside
+    /// `dynamic_object::get_object`: `find_by_global_id<Member>`
+    /// returns empty, `cached_object_` stays null, and `m->table_name()`
+    /// dereferences nullptr → SIGSEGV in
+    /// `swift_lattice::get_properties_for_table`. New writes are
+    /// covered by the LatticeCore fix; this guard keeps existing user
+    /// lattices from crashing on first reopen until they re-sync.
     ///
     /// Shared by `/reopen <name>` and the recent-row Enter activation.
     private func activateRecent(code: String, currentRoom: RoomInstance?) {
@@ -983,7 +998,9 @@ struct WorkspaceView: View {
             feedback("recent room '\(code)' has no session row", room: currentRoom)
             return
         }
-        let isHostRoom = (s.host?.userId == model.prefs.userId)
+        let myUserId = model.prefs.userId
+        let isHostRoom = entry.lattice.objects(Member.self)
+            .contains { $0.userId == myUserId && $0.isHost }
         if isHostRoom {
             Task {
                 do { _ = try await model.reopenAsHost(code: code) }
@@ -1496,7 +1513,15 @@ struct RoomPane: View {
 
     private var titleStrip: some View {
         let name = room.session?.name ?? room.roomCode
-        let host = room.session?.host?.nick ?? "?"
+        // Read the host nick from a direct Member query rather than
+        // following `Session.host`. Same belt-and-suspenders rationale
+        // as `activateRecent`: lattice files on disk that pre-date
+        // LatticeCore@113fc8d can have an orphaned
+        // `_Session_Member_host` row pointing at a deleted Member, and
+        // following it SIGSEGVs in `swift_lattice::get_properties_for_table`.
+        // The direct query stays inside the `Member` table.
+        let host = room.lattice.objects(Member.self)
+            .first(where: { $0.isHost })?.nick ?? "?"
         var line = Text("── \(name) ").foregroundColor(.dim)
         line = line + Text("── host: ").foregroundColor(.dim)
         line = line + Text(host).foregroundColor(.yellow)

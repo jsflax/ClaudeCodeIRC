@@ -999,8 +999,27 @@ struct WorkspaceView: View {
             return
         }
         let myUserId = model.prefs.userId
-        let isHostRoom = entry.lattice.objects(Member.self)
-            .contains { $0.userId == myUserId && $0.isHost }
+        let allMembers = Array(entry.lattice.objects(Member.self))
+        let isHostRoom = allMembers.contains { $0.userId == myUserId && $0.isHost }
+        Log.line("recent-activate",
+                 "code=\(code) myUserId=\(myUserId) members=[" +
+                 allMembers.map { "(nick=\($0.nick) userId=\($0.userId) isHost=\($0.isHost))" }
+                    .joined(separator: ",") +
+                 "] isHostRoom=\(isHostRoom) hasPublicURL=\(s.publicURL != nil)")
+        // Diagnostic: also surface in-flight orphan rows that survived a
+        // hard exit. Permanent thinking strip on rejoin = a `.streaming`
+        // Turn whose driver is gone.
+        let streamingTurns = entry.lattice.objects(Turn.self)
+            .where { $0.status == .streaming }
+        let pendingAsks = entry.lattice.objects(AskQuestion.self)
+            .where { $0.status == .pending }
+        let runningTools = entry.lattice.objects(ToolEvent.self)
+            .where { $0.status == .running }
+        let pendingApprovals = entry.lattice.objects(ApprovalRequest.self)
+            .where { $0.status == .pending }
+        Log.line("recent-activate",
+                 "orphans streamingTurns=\(streamingTurns.count) pendingAsks=\(pendingAsks.count) " +
+                 "runningTools=\(runningTools.count) pendingApprovals=\(pendingApprovals.count)")
         if isHostRoom {
             Task {
                 do { _ = try await model.reopenAsHost(code: code) }

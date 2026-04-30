@@ -184,6 +184,63 @@ public final class RoomsModel {
         entry.lattice.close()
     }
 
+    /// Reconcile in-flight rows left behind when a previous host process
+    /// exited abruptly (Ctrl+C, crash, hard kill). The driver and
+    /// `ApprovalMcpShim` subprocesses died with the parent — anything
+    /// they wrote in non-terminal state is now an orphan: nothing is
+    /// tailing votes, nothing is going to flip Turn.status to .done.
+    /// Without this pass the UI either renders a permanent "thinking"
+    /// strip (off `WorkspaceView.streamingTurn`), or shows an
+    /// AskUserQuestion ballot whose votes can't route back to claude.
+    ///
+    /// Host-only by construction — only `reopenAsHost` calls this.
+    /// Peer rejoin must NOT terminate these rows: the host could still
+    /// be alive elsewhere, and we'd be racing its writes.
+    ///
+    /// Mirrors the existing in-driver `cancelOrphanedAskQuestions` at
+    /// `ClaudeCLIDriver.cancelOrphanedAskQuestions()`; this is the
+    /// app-restart twin (the in-driver one only runs from a live
+    /// process, not on cold open).
+    private func terminateOrphanedInFlightRows(lattice: Lattice, code: String) {
+        let now = Date()
+        let orphanTurns = Array(lattice.objects(Turn.self)
+            .where { $0.status == .streaming })
+        let orphanAsks = Array(lattice.objects(AskQuestion.self)
+            .where { $0.status == .pending })
+        let orphanTools = Array(lattice.objects(ToolEvent.self)
+            .where { $0.status == .running })
+        // ApprovalRequest has no `.cancelled` — `.denied` is the safe
+        // host-takeover default (better than leaving the Y/A/D bar
+        // mounted on a request whose shim is dead).
+        let orphanApprovals = Array(lattice.objects(ApprovalRequest.self)
+            .where { $0.status == .pending })
+        let total = orphanTurns.count + orphanAsks.count + orphanTools.count + orphanApprovals.count
+        guard total > 0 else { return }
+        Log.line("rooms",
+                 "reopen-as-host code=\(code) terminating orphans: " +
+                 "\(orphanTurns.count) streaming Turn, \(orphanAsks.count) pending AskQuestion, " +
+                 "\(orphanTools.count) running ToolEvent, \(orphanApprovals.count) pending ApprovalRequest")
+        lattice.transaction {
+            for t in orphanTurns where t.status == .streaming {
+                t.status = .errored
+                t.endedAt = now
+            }
+            for q in orphanAsks where q.status == .pending {
+                q.status = .cancelled
+                q.cancelReason = "host process exited"
+                q.answeredAt = now
+            }
+            for e in orphanTools where e.status == .running {
+                e.status = .errored
+                e.endedAt = now
+            }
+            for r in orphanApprovals where r.status == .pending {
+                r.status = .denied
+                r.decidedAt = now
+            }
+        }
+    }
+
     // MARK: - Hosting + joining
 
     /// Host a new room. Opens the authoritative Lattice, inserts the
@@ -522,6 +579,7 @@ public final class RoomsModel {
             lattice.close()
             throw ReopenError.sessionNotFound
         }
+        terminateOrphanedInFlightRows(lattice: lattice, code: code)
         let userId = prefs.userId
         let me: Member
         if let existing = session.host {

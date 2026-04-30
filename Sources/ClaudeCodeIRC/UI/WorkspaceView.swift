@@ -100,9 +100,24 @@ struct WorkspaceView: View {
         // once. If multiple groups are stacked (unlikely under -p
         // serialisation), the earliest by requestedAt wins.
         let activeFile = model.activeRoom?.lattice.configuration.fileURL.lastPathComponent ?? "nil"
-        Log.line("workspace", "pendingAskQuestion getter activeRoomLattice=\(activeFile)")
+        // Enumerate every AskQuestion the @Query holds — by globalId
+        // prefix, status, and groupIndex/groupSize. Across a
+        // multi-question ask the peer should see N rows and the
+        // status of the previously-answered ones must read
+        // `.answered` so the sort/filter advances. This trace makes
+        // it obvious whether (a) the rows didn't sync, (b) they
+        // synced but stuck at `.pending`, or (c) the filter logic
+        // itself is wrong.
+        var summary: [String] = []
+        for q in askQuestions {
+            let gid = q.globalId?.uuidString.prefix(8) ?? "?"
+            summary.append("\(gid):g\(q.groupIndex)/\(q.groupSize):\(q.status)")
+        }
+        Log.line(
+            "workspace",
+            "pendingAskQuestion getter activeRoomLattice=\(activeFile) all=[\(summary.joined(separator: " "))]")
         let pending = askQuestions.filter { $0.status == .pending }
-        return pending
+        let chosen = pending
             .sorted { lhs, rhs in
                 if lhs.requestedAt != rhs.requestedAt {
                     return lhs.requestedAt < rhs.requestedAt
@@ -110,6 +125,13 @@ struct WorkspaceView: View {
                 return lhs.groupIndex < rhs.groupIndex
             }
             .first
+        if let chosen {
+            let gid = chosen.globalId?.uuidString.prefix(8) ?? "?"
+            Log.line("workspace", "pendingAskQuestion → \(gid) groupIndex=\(chosen.groupIndex)")
+        } else {
+            Log.line("workspace", "pendingAskQuestion → nil")
+        }
+        return chosen
     }
 
     /// Oldest `.pending` approval — Y/A/D on the host flips its status.
@@ -478,6 +500,9 @@ struct WorkspaceView: View {
         // TextField is defocused, vote / toggle. Otherwise
         // TextField's onSubmit handles it.
         .onKeyPress(Int32(UInt8(ascii: "\n"))) {
+            Log.line(
+                "workspace",
+                "Enter pressed focusedPane=\(focusedPane) askCardActive=\(askCardActive) draft.empty=\(draft.isEmpty) pendingAsk=\(pendingAskQuestion != nil)")
             switch focusedPane {
             case .sessions:
                 activateSessionsSelection()
@@ -493,7 +518,10 @@ struct WorkspaceView: View {
             case .input:
                 break
             }
-            guard askCardActive else { return }
+            guard askCardActive else {
+                Log.line("workspace", "Enter ignored — askCardActive=false")
+                return
+            }
             askActivateFocusedRow()
         }
     }
@@ -1156,8 +1184,14 @@ struct WorkspaceView: View {
     /// or toggle pending ballot (multi-select). For the "Other…" row:
     /// open the free-text overlay.
     private func askActivateFocusedRow() {
-        guard let q = pendingAskQuestion else { return }
+        guard let q = pendingAskQuestion else {
+            Log.line("workspace", "askActivate: no pending question — bailing")
+            return
+        }
         let otherIdx = q.options.count
+        Log.line(
+            "workspace",
+            "askActivate row=\(askFocusedRow) otherIdx=\(otherIdx) multiSelect=\(q.multiSelect) ballotBefore=\(askPendingBallot)")
         if askFocusedRow == otherIdx {
             askOtherVisible = true
             return
@@ -1171,10 +1205,12 @@ struct WorkspaceView: View {
             } else {
                 askPendingBallot.insert(label)
             }
+            Log.line("workspace", "askActivate multiSelect toggled label=\(label) ballotAfter=\(askPendingBallot)")
         } else {
             // Single-select: write directly. Re-pressing on the
             // already-voted-for label retracts the vote (delete the
             // existing AskVote row).
+            Log.line("workspace", "askActivate singleSelect cast label=\(label)")
             castSingleSelect(label: label, on: q)
         }
     }

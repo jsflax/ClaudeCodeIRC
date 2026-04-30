@@ -42,6 +42,9 @@ public final class PublicURLObserver {
     }
 
     private func attach(lattice: Lattice) {
+        let file = lattice.configuration.fileURL.lastPathComponent
+        let last = self.lastObservedURL ?? "nil"
+        Log.line("public-url-observer", "attach lattice=\(file) lastObserved=\(last)")
         observer = lattice.observe(Session.self) { @Sendable [weak self] change in
             switch change {
             case .insert, .update: break
@@ -58,7 +61,15 @@ public final class PublicURLObserver {
         guard let roomInstance,
               !roomInstance.isHost,           // host doesn't react to own writes
               let session = roomInstance.session
-        else { return }
+        else {
+            Log.line("public-url-observer", "evaluate skip — guard failed (no room/host/session)")
+            return
+        }
+        let cur = session.publicURL ?? "nil"
+        let last = self.lastObservedURL ?? "nil"
+        Log.line(
+            "public-url-observer",
+            "evaluate joinedViaTunnel=\(roomInstance.joinedViaTunnel) currentURL=\(cur) lastObserved=\(last)")
 
         // Only react if the peer is currently connected through the
         // tunnel — which is the only case `swap()` is for (cloudflared

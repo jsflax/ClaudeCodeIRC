@@ -573,9 +573,10 @@ public final class RoomInstance: Identifiable {
         precondition(
             !isHost,
             "RoomInstance.swap() is peer-only; the host's local server is unaffected by tunnel-URL changes")
+        let oldFile = lattice.configuration.fileURL.lastPathComponent
         Log.line(
             "room-instance",
-            "swap → \(endpoint.absoluteString) joinCode=\(joinCode != nil ? "present" : "nil")")
+            "swap ENTER → \(endpoint.absoluteString) joinCode=\(joinCode != nil ? "present" : "nil") oldLattice=\(oldFile)")
 
         // Snapshot stable identity for re-link after reopen.
         let selfMemberGlobalId = selfMember?.globalId
@@ -601,7 +602,9 @@ public final class RoomInstance: Identifiable {
         // sync clients on `_lattice_sync_state` and the new client
         // never connects (`broadcast … to 0 peers`). Single-handle
         // ordering keeps the sync state unambiguous.
+        Log.line("room-instance", "swap CLOSING old lattice file=\(oldFile)")
         lattice.close()
+        Log.line("room-instance", "swap CLOSED old lattice file=\(oldFile)")
 
         let newLattice = try peerLatticeStore.openPeer(
             code: roomCode,
@@ -634,6 +637,9 @@ public final class RoomInstance: Identifiable {
         // Re-attach the publicURL observer to the new Lattice instance.
         // Old observer's AnyCancellable drops here.
         self.publicURLObserver = PublicURLObserver(roomInstance: self)
+        Log.line(
+            "room-instance",
+            "swap EXIT newLattice=\(newLattice.configuration.fileURL.lastPathComponent)")
     }
 
     // MARK: - Host-side cancel observer

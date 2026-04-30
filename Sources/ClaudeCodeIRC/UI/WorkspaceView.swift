@@ -99,6 +99,8 @@ struct WorkspaceView: View {
         // sequential rule prevents two cards being interactive at
         // once. If multiple groups are stacked (unlikely under -p
         // serialisation), the earliest by requestedAt wins.
+        let activeFile = model.activeRoom?.lattice.configuration.fileURL.lastPathComponent ?? "nil"
+        Log.line("workspace", "pendingAskQuestion getter activeRoomLattice=\(activeFile)")
         let pending = askQuestions.filter { $0.status == .pending }
         return pending
             .sorted { lhs, rhs in

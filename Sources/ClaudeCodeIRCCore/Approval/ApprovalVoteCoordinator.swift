@@ -59,6 +59,13 @@ public final class ApprovalVoteCoordinator {
     /// `.where` so we don't materialise the full tables — a busy
     /// room can have thousands of decided approvals and hundreds of
     /// members, but the scan only touches the few pending rows.
+    ///
+    /// Body is split into `reevaluatePending` (outer loop + quorum)
+    /// and `commitTallyIfReady(req:presentQuorum:)` (per-request
+    /// counting + status write) to dodge a Swift 6.3.1 compiler
+    /// crash in the `SendNonSendable` SIL pass when the two were
+    /// inlined together. 6.3.0 builds fine; 6.3.1 (shipped on the
+    /// macos-26 runner's Xcode 26.4.1) does not.
     private func reevaluatePending() {
         // Quorum denominator: non-AFK, recently-heartbeated members.
         // `RoomInstance` writes `lastSeenAt = Date()` every
@@ -71,28 +78,32 @@ public final class ApprovalVoteCoordinator {
             .count
 
         for req in lattice.objects(ApprovalRequest.self).where({ $0.status == .pending }) {
-            // Iterate the request's votes relation lazily — count yes
-            // / no without building an Array.
-            var yes = 0
-            var no = 0
-            for vote in req.votes {
-                switch vote.decision {
-                case .approved: yes += 1
-                case .denied:   no += 1
-                case .pending:  break
-                }
-            }
-            let result = ApprovalTally.evaluate(
-                yes: yes, no: no, presentQuorum: presentQuorum)
-            guard result.outcome != .pending else { continue }
-            Log.line("vote-coord",
-                     "request \(req.toolName) → \(result.outcome) (yes=\(yes) no=\(no) quorum=\(presentQuorum))")
-            req.status = result.outcome
-            req.decidedAt = Date()
-            // decidedBy is intentionally left nil — there is no single
-            // decider when the result is consensus. The card renderer
-            // interprets nil decidedBy as "by quorum". Host-only
-            // always-allow (the [A] key) still sets decidedBy = host.
+            commitTallyIfReady(req: req, presentQuorum: presentQuorum)
         }
+    }
+
+    private func commitTallyIfReady(req: ApprovalRequest, presentQuorum: Int) {
+        // Iterate the request's votes relation lazily — count yes /
+        // no without building an Array.
+        var yes = 0
+        var no = 0
+        for vote in req.votes {
+            switch vote.decision {
+            case .approved: yes += 1
+            case .denied:   no += 1
+            case .pending:  break
+            }
+        }
+        let result = ApprovalTally.evaluate(
+            yes: yes, no: no, presentQuorum: presentQuorum)
+        guard result.outcome != .pending else { return }
+        Log.line("vote-coord",
+                 "request \(req.toolName) → \(result.outcome) (yes=\(yes) no=\(no) quorum=\(presentQuorum))")
+        req.status = result.outcome
+        req.decidedAt = Date()
+        // decidedBy is intentionally left nil — there is no single
+        // decider when the result is consensus. The card renderer
+        // interprets nil decidedBy as "by quorum". Host-only
+        // always-allow (the [A] key) still sets decidedBy = host.
     }
 }

@@ -46,5 +46,13 @@ let package = Package(
             ],
             swiftSettings: [.interoperabilityMode(.Cxx)]
         ),
+        .testTarget(
+            name: "ClaudeCodeIRCE2ETests",
+            dependencies: [
+                "ClaudeCodeIRC",  // executable — depending on it triggers the build
+                .product(name: "NCUITest", package: "NCursesUI"),
+                .product(name: "NCUITestProtocol", package: "NCursesUI"),
+            ]
+        ),
     ]
 )

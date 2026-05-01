@@ -5,6 +5,37 @@ All notable changes to ClaudeCodeIRC are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.3] — 2026-05-02
+
+### Fixed
+
+- Peer `/reopen` over Cloudflare Tunnel now actually reconnects.
+  `Session.publicURL` is the host's bare tunnel origin
+  (`https://*.trycloudflare.com`); `PublicURLObserver` translated it
+  to `wss://.../room/<code>` before calling `RoomInstance.swap`, but
+  `WorkspaceView.activateRecent` (the `/reopen` codepath) handed the
+  raw https URL straight to `reopenAsPeer`. Lattice's WSS upgrade
+  silently failed and sync was dead — the room rendered
+  `[public:ready]` locally but no messages flowed in either
+  direction. Translation logic is now a single helper
+  (`PublicURLObserver.wssEndpoint(forPublicURL:roomCode:)`) used by
+  both call sites.
+- `RoomInstance.swap` short-circuits when the incoming endpoint +
+  joinCode match the current connection. Reopening Lattice for an
+  unchanged target left cached `@Query` results pointing at the
+  closed C++ `swift_lattice`, and the next view read SIGSEGV'd in
+  `database::query` with a null `db_`. Manifested as a crash on
+  first peer-join with long history (catch-up triggered a same-URL
+  swap during initial render).
+
+### Tests
+
+- `scripts/smoke/c12-peer-crash-rejoin.sh` — end-to-end repro of the
+  reopen-over-tunnel bug. Hosts public via cloudflared, peer joins,
+  SIGKILLs the peer, host keeps using the room during downtime,
+  peer restarts and runs `/reopen`, asserts catch-up replay +
+  bidirectional live sync. Skipped if `cloudflared` isn't on PATH.
+
 ## [0.0.2] — 2026-05-01
 
 ### Fixed

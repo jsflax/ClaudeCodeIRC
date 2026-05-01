@@ -95,4 +95,14 @@ public final class AskQuestion {
     /// when the coordinator re-evaluates on any vote/option change.
     @Relation(link: \AskVote.question)
     public var votes: any Results<AskVote>
+
+    /// Discussion thread bound to this question — peer-to-peer chat for
+    /// resolving disagreement. Never reaches claude (see `AskComment`).
+    /// `List<T>` (parent-owned) over `@Relation` backlink because:
+    /// - the link table is keyed by `globalId` (sync-correct), not the
+    ///   per-replica `primaryKey` rowid that backlinks rely on
+    /// - insertion order is the desired display order; no `createdAt`
+    ///   sort needed and no risk of clock-skew reordering
+    /// - lifecycle is bound to the parent question
+    public var comments: List<AskComment>
 }

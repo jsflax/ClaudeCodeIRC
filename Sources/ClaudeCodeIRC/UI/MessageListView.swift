@@ -23,6 +23,10 @@ struct MessageListView: View {
     let activeAskQuestionId: UUID?
     let askFocusedRow: Int
     let askPendingBallot: Set<String>
+    /// Discussion thread state, plumbed through to `AskQuestionCardView`.
+    @Binding var askDiscussionDraft: String
+    @Binding var askDiscussionFocused: Bool
+    let onAskCommentSubmit: () -> Void
     /// Currently-streaming claude turn, if any. When non-nil and no
     /// decision is pending, MessageListView injects a synthetic
     /// `.thinking` event at the bottom of the scrollback so the user
@@ -57,7 +61,10 @@ struct MessageListView: View {
                         focusedRow: askFocusedRow,
                         pendingBallot: askPendingBallot,
                         isFocused: q.globalId == activeAskQuestionId,
-                        selfMember: selfMember)
+                        selfMember: selfMember,
+                        discussionDraft: $askDiscussionDraft,
+                        discussionFocused: $askDiscussionFocused,
+                        onCommentSubmit: onAskCommentSubmit)
                 case .toolEvent(let t):
                     ToolEventRow(event: t)
                 case .thinking(let turnId, let startedAt, let tokensSoFar):

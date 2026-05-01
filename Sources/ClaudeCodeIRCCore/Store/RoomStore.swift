@@ -24,6 +24,7 @@ public enum RoomStore {
         ApprovalVote.self,
         AskQuestion.self,
         AskVote.self,
+        AskComment.self,
     ]
 
     /// Open (or create) the host-side authoritative room DB on disk.

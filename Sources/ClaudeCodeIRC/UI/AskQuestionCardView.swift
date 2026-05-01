@@ -31,6 +31,20 @@ struct AskQuestionCardView: View {
     /// the `[x]` checkbox column.
     let selfMember: Member?
 
+    /// Discussion thread state, owned by `WorkspaceView`. When
+    /// `discussionFocused == true` the inline TextField at the bottom
+    /// of the card captures keys; when false, arrow/Enter/Space route
+    /// to the option list. The `comments` `List<AskComment>` itself
+    /// fires the parent's `.update` observer on append (see Lattice
+    /// `crossProcessListAppend` test) so peer-side comment inserts
+    /// re-render this view without a separate `@Query` dependency.
+    @Binding var discussionDraft: String
+    @Binding var discussionFocused: Bool
+    /// Called when the user presses Enter on a non-empty draft.
+    /// `WorkspaceView` writes the `AskComment` since it owns the
+    /// lattice handle.
+    let onCommentSubmit: () -> Void
+
     @Query var members: TableResults<Member>
     /// Drives re-render when peers' AskVotes arrive via Lattice sync.
     /// `question.votes` is a `@Relation` backlink — traversing it
@@ -76,6 +90,32 @@ struct AskQuestionCardView: View {
                 optionRow(idx: idx, option: question.options[idx])
             }
             otherRow
+            discussionBlock
+        }
+    }
+
+    /// Inline thread + composer. Visible only when there's at least
+    /// one comment, the user is composing, or the composer has focus.
+    /// Pre-fix the affordance is hidden to keep simple ballots clean.
+    @ViewBuilder
+    private var discussionBlock: some View {
+        let hasContent = question.comments.count > 0 || !discussionDraft.isEmpty || discussionFocused
+        if hasContent && question.status == .pending {
+            SpacerView(1)
+            Text("─── discussion ───").foregroundColor(.dim)
+            ForEach(Array(question.comments)) { c in
+                let nick = c.author?.nick ?? "?"
+                Text("  <\(nick)> ").foregroundColor(NickColor.color(for: nick))
+                    + Text(c.text).foregroundColor(.dim)
+            }
+            HStack {
+                let myNick = selfMember?.nick ?? "you"
+                Text("  <\(myNick)> ").foregroundColor(NickColor.color(for: myNick))
+                TextField("",
+                          text: $discussionDraft,
+                          isFocused: $discussionFocused,
+                          onSubmit: onCommentSubmit)
+            }
         }
     }
 
@@ -209,10 +249,10 @@ struct AskQuestionCardView: View {
                 .paletteColor(.accent)
             line = line + Text("   ").paletteColor(.dim)
             if question.multiSelect {
-                line = line + Text("↑/↓ move · Enter toggle · Tab commit")
+                line = line + Text("↑/↓ move · Enter toggle · Space commit · Tab focus")
                     .paletteColor(.dim)
             } else {
-                line = line + Text("↑/↓ move · Enter vote · Esc unfocus")
+                line = line + Text("↑/↓ move · Enter vote · Tab focus")
                     .paletteColor(.dim)
             }
             return line

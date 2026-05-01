@@ -91,6 +91,14 @@ struct WorkspaceView: View {
     /// has its Other row focused and the user hits Enter.
     @State private var askOtherVisible: Bool = false
 
+    /// Per-card discussion-thread composer state. Reset whenever
+    /// `pendingAskQuestion` changes (a new ballot starts with an empty
+    /// draft and ballot-focused). When `askDiscussionFocused == true`
+    /// the inline TextField in the card captures keys instead of the
+    /// option list / main composer.
+    @State private var askDiscussionDraft: String = ""
+    @State private var askDiscussionFocused: Bool = false
+
     /// Oldest `.pending` AskQuestion that should be the active focus
     /// target. Mirrors `pendingApproval`: drives both visibility of
     /// the focus marker and the input-handler routing in WorkspaceView.
@@ -295,6 +303,17 @@ struct WorkspaceView: View {
         // Tab — slash-complete when the draft starts with `/`, nick-
         // complete otherwise. TextField lets Tab bubble to us.
         .onKeyPress(9) { handleTab() }
+        // Space — when a multi-select ballot is the focus target,
+        // commit the local pending ballot. (Was Tab pre-discussion;
+        // moved to Space so Tab can switch focus between vote and
+        // discussion composer.) When the discussion composer owns
+        // focus, the TextField has already eaten the keystroke and
+        // we never reach here.
+        .onKeyPress(Int32(UInt8(ascii: " "))) {
+            guard askCardActive, !askDiscussionFocused,
+                  let q = pendingAskQuestion, q.multiSelect else { return }
+            askCommitBallot()
+        }
         .onKeyPress(Int32(UInt8(ascii: "Y"))) { castVote(.approved) }
         .onKeyPress(Int32(UInt8(ascii: "y"))) { castVote(.approved) }
         .onKeyPress(Int32(UInt8(ascii: "D"))) { castVote(.denied) }
@@ -344,6 +363,8 @@ struct WorkspaceView: View {
             askFocusedRow = 0
             askPendingBallot = []
             askActiveQuestionId = pendingAskQuestion?.globalId
+            askDiscussionDraft = ""
+            askDiscussionFocused = false
         }
         // Drain `RoomsModel.pendingNotice` (one-shot user-facing string
         // posted by the model — e.g. a kick) into the active room's
@@ -397,6 +418,9 @@ struct WorkspaceView: View {
                 activeAskQuestionId: pendingAskQuestion?.globalId,
                 askFocusedRow: askFocusedRow,
                 askPendingBallot: askPendingBallot,
+                askDiscussionDraft: $askDiscussionDraft,
+                askDiscussionFocused: $askDiscussionFocused,
+                onAskCommentSubmit: submitAskComment,
                 extraChromeRows: extraChromeRows)
         } else {
             WelcomePane(
@@ -522,6 +546,15 @@ struct WorkspaceView: View {
                 Log.line("workspace", "Enter ignored — askCardActive=false")
                 return
             }
+            // Discussion composer wins when focused. The card's
+            // TextField captures keystrokes for typing but Enter
+            // doesn't always reach its onSubmit (Binding chain
+            // through MessageListView → RoomPane → WorkspaceView
+            // can lag a frame), so we route at the root unambiguously.
+            if askDiscussionFocused {
+                submitAskComment()
+                return
+            }
             askActivateFocusedRow()
         }
     }
@@ -614,8 +647,11 @@ struct WorkspaceView: View {
             completeSlash()
             return
         }
-        if askCardActive, let q = pendingAskQuestion, q.multiSelect {
-            askCommitBallot()
+        // When a ballot card owns focus, Tab toggles between the option
+        // list (vote) and the inline discussion composer (chat).
+        // Multi-select commit moved to Space (see Space handler).
+        if askCardActive {
+            askDiscussionFocused.toggle()
             return
         }
         let scalars = Array(draft)
@@ -1341,6 +1377,28 @@ struct WorkspaceView: View {
         lattice.commitTransaction()
         Log.line("workspace", "submitted other answer=\"\(trimmed)\" on \"\(q.header)\"")
     }
+
+    /// Append a comment to the focused `AskQuestion`'s discussion
+    /// thread. Whitespace-only drafts no-op (Enter on empty draft is
+    /// a "stay put" rather than a write). Comments live in
+    /// `question.comments: List<AskComment>`; the parent-list
+    /// `.update` notification will re-render the card on every peer
+    /// (see Lattice `crossProcessListAppend` test).
+    private func submitAskComment() {
+        let trimmed = askDiscussionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let q = pendingAskQuestion,
+              let room = model.activeRoom,
+              let me = room.selfMember else { return }
+        let c = AskComment()
+        c.author = me
+        c.text = trimmed
+        c.createdAt = Date()
+        q.comments.append(c)
+        askDiscussionDraft = ""
+        Log.line("workspace",
+                 "askComment posted nick=\(me.nick) len=\(trimmed.count) on q=\"\(q.header.prefix(40))\"")
+    }
 }
 
 // MARK: - Slash popup
@@ -1449,6 +1507,12 @@ struct RoomPane: View {
     let activeAskQuestionId: UUID?
     let askFocusedRow: Int
     let askPendingBallot: Set<String>
+    /// Discussion thread state, plumbed through to `MessageListView` ⇒
+    /// `AskQuestionCardView`. Owned by `WorkspaceView`; reset on
+    /// question change.
+    @Binding var askDiscussionDraft: String
+    @Binding var askDiscussionFocused: Bool
+    let onAskCommentSubmit: () -> Void
     /// Rows the parent's chrome takes on top of `RoomPane`'s baseline
     /// of 6. Slash popup + host statusline are the dynamic ones; both
     /// live in `WorkspaceView` and need to be subtracted from the
@@ -1515,6 +1579,9 @@ struct RoomPane: View {
                     activeAskQuestionId: activeAskQuestionId,
                     askFocusedRow: askFocusedRow,
                     askPendingBallot: askPendingBallot,
+                    askDiscussionDraft: $askDiscussionDraft,
+                    askDiscussionFocused: $askDiscussionFocused,
+                    onAskCommentSubmit: onAskCommentSubmit,
                     streamingTurn: streamingTurn)
             }
             // Auto-pin to bottom whenever a new scrollback row

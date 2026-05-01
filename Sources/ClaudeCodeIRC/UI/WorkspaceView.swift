@@ -311,6 +311,9 @@ struct WorkspaceView: View {
             s.permissionMode = s.permissionMode.next()
             Log.line("workspace", "permission mode → \(s.permissionMode.label)")
         }
+        .overlay(isPresented: firstRunNickVisible, dimsBackground: true) {
+            FirstRunNickOverlay(prefs: model.prefs)
+        }
         .overlay(isPresented: $hostFormVisible, dimsBackground: true) {
             HostFormOverlay(
                 model: model,
@@ -554,8 +557,23 @@ struct WorkspaceView: View {
         guard !hostFormVisible, !joinFormVisible, !addGroupVisible, !askOtherVisible else {
             return false
         }
+        // First-run nick picker owns all input until a nick is chosen.
+        guard !model.prefs.nick.isEmpty else { return false }
         guard pendingAskQuestion != nil, draft.isEmpty else { return false }
         return true
+    }
+
+    /// First-run nick picker is mandatory: if `prefs.nick` is empty
+    /// (fresh launch on a new data dir), a `FirstRunNickOverlay` is
+    /// presented to collect a nick before the user can do anything
+    /// else. The binding is computed (not @State) so the overlay
+    /// dismisses automatically when the user submits — setting
+    /// `prefs.nick` to a non-empty string flips `isEmpty` to false
+    /// and the @Observable propagation re-evaluates this getter.
+    private var firstRunNickVisible: Binding<Bool> {
+        Binding(
+            get: { self.model.prefs.nick.isEmpty },
+            set: { _ in })
     }
 
     private var inputFocusBinding: Binding<Bool> {
@@ -577,6 +595,8 @@ struct WorkspaceView: View {
             get: {
                 if focusedPane != .input { return false }
                 if hostFormVisible || joinFormVisible || addGroupVisible { return false }
+                // First-run nick picker owns the TextField until nick is set.
+                if model.prefs.nick.isEmpty { return false }
                 if askOtherVisible { return false }
                 if pendingApproval != nil && draft.isEmpty { return false }
                 if pendingAskQuestion != nil && draft.isEmpty { return false }
@@ -1889,5 +1909,65 @@ struct AddGroupOverlay: View {
         } catch {
             self.error = "\(error)"
         }
+    }
+}
+
+/// First-run nick picker. Mandatory: presented automatically when
+/// `prefs.nick.isEmpty` (fresh data dir, no prior session). Stays
+/// visible until the user submits a non-empty, whitespace-free nick
+/// — there is no cancel affordance, ESC is a no-op, and the parent's
+/// input focus / sidebar nav are gated off while it's up.
+///
+/// Validation mirrors `InputRouter.parse("/nick …")`: trim, reject
+/// empty, reject whitespace inside the name. On success the nick
+/// goes straight into the `AppPreferences` row, which dismisses the
+/// overlay automatically (the parent's `firstRunNickVisible` getter
+/// computes from `prefs.nick.isEmpty`).
+struct FirstRunNickOverlay: View {
+    let prefs: AppPreferences
+
+    @State private var nick: String = ""
+    @State private var error: String = ""
+
+    var body: some View {
+        BoxView("Welcome to ClaudeCodeIRC", color: .cyan) {
+            VStack {
+                Text("Pick a nickname for this device.").foregroundColor(.dim)
+                Text("It shows up next to your messages and votes.").foregroundColor(.dim)
+                SpacerView(1)
+                HStack {
+                    Text("nick: ").foregroundColor(.dim)
+                    TextField("alice",
+                              text: $nick,
+                              isFocused: .constant(true),
+                              onSubmit: submit)
+                }
+                SpacerView(1)
+                Text("↵ continue").foregroundColor(.dim)
+                if !error.isEmpty {
+                    Text(error).foregroundColor(.red)
+                }
+            }
+        }
+        // Mandatory first-run setup — ESC consumed as no-op so it
+        // doesn't bubble to the parent's interrupt-turn handler. (No
+        // turn can be streaming on first run anyway, but explicit
+        // > implicit.)
+        .onKeyPress(27 /* ESC */) { }
+    }
+
+    private func submit() {
+        let trimmed = nick.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            error = "nick can't be empty"
+            return
+        }
+        guard !trimmed.contains(where: { $0.isWhitespace }) else {
+            error = "nick can't contain whitespace"
+            return
+        }
+        prefs.nick = trimmed
+        // Overlay dismisses automatically — the parent's binding
+        // re-evaluates `prefs.nick.isEmpty` and flips to false.
     }
 }

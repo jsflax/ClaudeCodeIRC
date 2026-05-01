@@ -13,11 +13,15 @@ struct TopBar: View {
         let active = model.activeRoom
         let name: String = active?.session?.name ?? active?.roomCode ?? "lobby"
         let topic: String = active?.session?.topic ?? ""
+        // Per-device nick from prefs — shown in lobby AND rooms so the
+        // user can always confirm what handle they're on. Empty in the
+        // brief window before the first-run picker submits.
+        let nick: String = model.prefs.nick
 
         return HStack(spacing: 0) {
             // Static prefix — re-renders only when the active room
-            // / topic changes (driven by RoomsModel observers).
-            staticHeader(name: name, topic: topic)
+            // / topic / nick changes (driven by RoomsModel observers).
+            staticHeader(name: name, topic: topic, nick: nick)
             // Live clock — its own view so only it re-renders on
             // every minute tick. Without the split, the State write
             // for `now` would invalidate the whole TopBar body.
@@ -29,8 +33,12 @@ struct TopBar: View {
     /// the design (`var(--tui-fg)` background, `var(--tui-bg)` text).
     /// `.reverse()` lives on Text, so we apply it here and let the
     /// HStack compose the already-styled runs alongside `Clock`.
-    private func staticHeader(name: String, topic: String) -> Text {
+    private func staticHeader(name: String, topic: String, nick: String) -> Text {
         var line = Text("claude-code.irc").bold()
+        if !nick.isEmpty {
+            line = line + Text("  │  ")
+            line = line + Text("<\(nick)>").bold()
+        }
         line = line + Text("  │  ")
         line = line + Text(name).bold()
         if !topic.isEmpty {

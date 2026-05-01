@@ -16,6 +16,14 @@ turns from any pane.
 
 ### Core
 
+- First-run nick picker overlay: a fresh `CCIRC_DATA_DIR` (no
+  `prefs.nick`) presents a mandatory `Welcome to ClaudeCodeIRC`
+  modal. ESC is no-op; Enter validates (non-empty, no whitespace)
+  and persists the nick. Subsequent launches skip the overlay.
+- Top-bar shows the per-device nick alongside the active room:
+  `claude-code.irc │ <alice> │ alice-room │ HH:mm`. Visible in the
+  lobby state too so users can confirm their handle without joining
+  a room first.
 - 3-column NCursesUI workspace: sessions sidebar, scrollback +
   composer, members sidebar.
 - Tab-cycled focus across panes; arrow-key navigation inside each

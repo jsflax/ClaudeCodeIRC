@@ -23,6 +23,7 @@ CASES=(
     "c7:c7-3p-approval.sh:tool approval Y/A/D quorum (3 peers)"
     "c8:c8-3p-multiselect.sh:multi-select Ask wait-for-all (3 peers)"
     "c9:c9-keystroke-latency.sh:perf non-regression — keystroke latency"
+    "c10:c10-first-run-nick.sh:first-run nick picker overlay"
 )
 
 # Optional case filter — if args are passed, only run those cases.

@@ -182,6 +182,19 @@ enum ToolDiffPreview {
         if let prebaked = parsed.prebakedPatch, !prebaked.isEmpty {
             return prebaked
         }
+        // Write-create: a single pair with empty `old` means there
+        // was no prior file (claude code's `tool_use_result` has no
+        // `originalFile` / `structuredPatch` for fresh creates). The
+        // disk-read fallback below would mistakenly read the
+        // just-written file and produce `updated == original` → empty
+        // diff. Short-circuit to the pairs-only renderer which emits
+        // the new content as a pure add (`@@ 0 ⇢ N @@` + `+line`
+        // rows), matching how an Edit's pre-execution preview renders
+        // the same shape.
+        if parsed.pairs.count == 1, parsed.pairs[0].old.isEmpty,
+           !parsed.pairs[0].new.isEmpty {
+            return synthesizePatch(parsed.pairs)
+        }
         if let original = parsed.originalContent, !parsed.pairs.isEmpty {
             let updated = applyEdits(parsed.pairs, to: original)
             if updated != original {

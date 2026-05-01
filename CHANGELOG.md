@@ -5,6 +5,34 @@ All notable changes to ClaudeCodeIRC are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.2] — 2026-05-01
+
+### Fixed
+
+- File diffs now render in `auto` mode (and any other path that
+  bypasses the approval card). Two regressions were stacked:
+  - `claude -p`'s stream-json envelope keys the rich tool-result
+    sibling as `tool_use_result` (snake_case), but `StreamJsonEvent.UserMessage`
+    declared the property as `toolUseResult` with no `CodingKeys`
+    mapping — the field silently decoded as nil, leaving
+    `ToolEvent.resultMeta` empty. Without it, `ToolEventRow`'s
+    post-execution diff renderer had nothing to draw and fell back to
+    re-reading the just-modified file (producing an empty diff).
+  - `ToolDiffPreview.renderablePatch` had no Write-create branch.
+    A fresh-file Write produces `originalFile: null` /
+    `structuredPatch: []` in `tool_use_result`, so the
+    `applyEdits`-against-disk fallback would compare the new content
+    against itself and return nil. Now a single pair with empty `old`
+    short-circuits to a pure-add unified diff.
+
+### Tests
+
+- `StreamJsonEventTests.decodesUserToolUseResultSnakeCase` pins the
+  wire-key mapping at the decoder layer.
+- `scripts/smoke/c11-auto-diff.sh` exercises the full `auto`-mode
+  Edit + Write-create render path end-to-end (host + spawn `claude
+  -p` + `ToolDiffPreview` + `DiffBlockView`).
+
 ## [0.0.1] — 2026-05-01
 
 First public release. ClaudeCodeIRC is a multi-user terminal chat for

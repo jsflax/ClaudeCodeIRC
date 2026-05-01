@@ -34,7 +34,23 @@ public enum StreamJsonEvent: Sendable, Decodable {
         /// (an array of `-old`/`+new` unified-diff lines) and
         /// `originalFile`. We preserve the raw JSON here and let the
         /// processor route it into `ToolEvent.resultMeta`.
+        ///
+        /// Wire key is snake_case (`tool_use_result`) — claude code's
+        /// transcript JSONL uses camelCase, but `claude -p`'s
+        /// `--output-format stream-json` does not. Without the explicit
+        /// mapping the field silently decodes as nil and ToolEvent's
+        /// post-execution diff render has no `originalFile` /
+        /// `structuredPatch` to work with — falling back to a disk read
+        /// of the *already-modified* file, which makes diffs disappear
+        /// entirely in `auto` / `acceptEdits` modes (no approval card
+        /// to catch the pre-modification state).
         public let toolUseResult: ContentValue?
+
+        public enum CodingKeys: String, CodingKey {
+            case session_id
+            case message
+            case toolUseResult = "tool_use_result"
+        }
 
         public struct Envelope: Decodable, Sendable {
             /// Content is usually an array of `{type:"text", text:"…"}`

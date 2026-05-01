@@ -76,6 +76,28 @@ import ClaudeCodeIRCCore
         #expect(r.result == "done")
     }
 
+    @Test func decodesUserToolUseResultSnakeCase() throws {
+        // `claude -p`'s stream-json output keys this sibling envelope
+        // as `tool_use_result` (snake_case). The Swift property is
+        // `toolUseResult` (camelCase) and only decodes via an explicit
+        // CodingKeys mapping. If the mapping is missing the field
+        // silently decodes as nil, `ToolEvent.resultMeta` is empty,
+        // and `ToolEventRow` can't render a diff in `auto` /
+        // `acceptEdits` modes (no approval card to fall back to).
+        let event = try decode(#"""
+        {"type":"user","session_id":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"ok","is_error":false}]},"tool_use_result":{"filePath":"/tmp/x","oldString":"a","newString":"b","originalFile":"a\n","structuredPatch":[{"oldStart":1,"oldLines":1,"newStart":1,"newLines":1,"lines":["-a","+b"]}]}}
+        """#)
+        guard case .user(let u) = event else {
+            Issue.record("expected .user"); return
+        }
+        guard case .object(let meta) = u.toolUseResult else {
+            Issue.record("toolUseResult should decode from `tool_use_result` snake_case key")
+            return
+        }
+        #expect(meta["originalFile"] != nil, "originalFile preserved in toolUseResult")
+        #expect(meta["structuredPatch"] != nil, "structuredPatch preserved in toolUseResult")
+    }
+
     @Test func unknownTypeFallsBack() throws {
         let event = try decode(#"{"type":"something_new_in_v2","foo":"bar"}"#)
         if case .unknown(let raw) = event {

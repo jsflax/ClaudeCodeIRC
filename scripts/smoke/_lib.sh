@@ -153,6 +153,15 @@ setup_solo() {
 #   when focus is on .auth or .visibility.
 host_session() {
     local pane="$1" nick="$2" room_name="${3:-${nick}-room}"
+    # Fresh data dir → FirstRunNickOverlay owns input until a nick is
+    # set. Type just the bare nick + Enter to satisfy the overlay
+    # validator (non-empty, no whitespace); the overlay dismisses and
+    # `prefs.nick` is persisted. If the overlay isn't present (rerun
+    # against a populated data dir) the bare nick is just typed into
+    # the composer and the trailing /nick below adjusts to the
+    # canonical value.
+    tmux send-keys -t "$SMOKE_SESSION:0.$pane" "$nick" Enter
+    sleep 1
     tmux send-keys -t "$SMOKE_SESSION:0.$pane" "/nick $nick" Enter
     sleep 1
     tmux send-keys -t "$SMOKE_SESSION:0.$pane" "/host" Enter
@@ -180,6 +189,10 @@ host_session() {
 #   smoke runs land Down+Enter on the wrong row.
 join_session() {
     local pane="$1" nick="$2" room_name="$3"
+    # Same first-run-nick dismissal pattern as host_session — see the
+    # comment there for the rationale.
+    tmux send-keys -t "$SMOKE_SESSION:0.$pane" "$nick" Enter
+    sleep 1
     tmux send-keys -t "$SMOKE_SESSION:0.$pane" "/nick $nick" Enter
     sleep 1
     tmux send-keys -t "$SMOKE_SESSION:0.$pane" "/join $room_name" Enter

@@ -24,6 +24,7 @@ CASES=(
     "c8:c8-3p-multiselect.sh:multi-select Ask wait-for-all (3 peers)"
     "c9:c9-keystroke-latency.sh:perf non-regression — keystroke latency"
     "c10:c10-first-run-nick.sh:first-run nick picker overlay"
+    "c11:c11-auto-diff.sh:Edit/Write diff renders in auto mode (post-exec resultMeta)"
 )
 
 # Optional case filter — if args are passed, only run those cases.

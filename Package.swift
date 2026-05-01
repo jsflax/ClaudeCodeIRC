@@ -10,7 +10,7 @@ let package = Package(
         .library(name: "ClaudeCodeIRCCore", targets: ["ClaudeCodeIRCCore"]),
     ],
     dependencies: [
-        .package(path: "../NCursesUI"),
+        .package(url: "https://github.com/jsflax/NCursesUI.git", branch: "main"),
         .package(url: "https://github.com/jsflax/lattice.git", branch: "main"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.12.0"),

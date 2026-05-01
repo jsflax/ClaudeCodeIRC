@@ -94,15 +94,17 @@ struct AskQuestionCardView: View {
         }
     }
 
-    /// Inline thread + composer. Visible only when there's at least
-    /// one comment, the user is composing, or the composer has focus.
-    /// Pre-fix the affordance is hidden to keep simple ballots clean.
+    /// Inline thread + composer. Always rendered for `.pending`
+    /// questions so the affordance is discoverable even when the
+    /// thread is empty. Tab toggles focus between the option list and
+    /// the composer; the focus marker (`▸`) on the composer line and
+    /// the dimmed option-list markers reflect that state.
     @ViewBuilder
     private var discussionBlock: some View {
-        let hasContent = question.comments.count > 0 || !discussionDraft.isEmpty || discussionFocused
-        if hasContent && question.status == .pending {
+        if question.status == .pending {
             SpacerView(1)
-            Text("─── discussion ───").foregroundColor(.dim)
+            let dividerRole: Palette.Role = discussionFocused ? .accent : .dim
+            Text("─── discussion ───").paletteColor(dividerRole)
             ForEach(Array(question.comments)) { c in
                 let nick = c.author?.nick ?? "?"
                 Text("  <\(nick)> ").foregroundColor(NickColor.color(for: nick))
@@ -110,7 +112,9 @@ struct AskQuestionCardView: View {
             }
             HStack {
                 let myNick = selfMember?.nick ?? "you"
-                Text("  <\(myNick)> ").foregroundColor(NickColor.color(for: myNick))
+                let markerRole: Palette.Role = discussionFocused ? .accent : .dim
+                Text(discussionFocused ? "▸ " : "  ").paletteColor(markerRole)
+                Text("<\(myNick)> ").foregroundColor(NickColor.color(for: myNick))
                 TextField("",
                           text: $discussionDraft,
                           isFocused: $discussionFocused,
@@ -213,7 +217,10 @@ struct AskQuestionCardView: View {
         let isChecked = isLabelChecked(option.label)
         let voters = votersFor(label: option.label)
 
-        var line = Text(isFocusedRow ? "▸ " : "  ").paletteColor(.accent)
+        // When discussion has focus, dim the option-list marker so the
+        // user sees focus has moved off the ballot.
+        let markerRole: Palette.Role = discussionFocused ? .dim : .accent
+        var line = Text(isFocusedRow ? "▸ " : "  ").paletteColor(markerRole)
         line = line + Text(isChecked ? "[x] " : "[ ] ")
             .paletteColor(isChecked ? .ok : .mute)
         line = line + Text(option.label).paletteColor(.fg)
@@ -230,7 +237,8 @@ struct AskQuestionCardView: View {
 
     private var otherRow: Text {
         let isFocusedRow = isFocused && focusedRow == otherRowIndex
-        var line = Text(isFocusedRow ? "▸ " : "  ").paletteColor(.accent)
+        let markerRole: Palette.Role = discussionFocused ? .dim : .accent
+        var line = Text(isFocusedRow ? "▸ " : "  ").paletteColor(markerRole)
         line = line + Text("[ ] ").paletteColor(.mute)
         line = line + Text("Other… (type answer)").paletteColor(.dim)
         return line

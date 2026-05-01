@@ -10,25 +10,16 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
-      # macos-15 ships Swift 6.1; lattice declares 6.3. Pull the
-      # latest 6.3 dev snapshot — same approach as ci.yml so the
-      # release binary's toolchain matches what's tested in CI.
-      - name: Install Swift 6.3 toolchain
-        shell: bash
-        run: |
-          set -eux
-          BRANCH="swift-6.3-branch"
-          curl -fL "https://download.swift.org/${BRANCH}/xcode/latest-build.yml" -o /tmp/latest.yml
-          DIR=$(grep '^dir:' /tmp/latest.yml | awk '{print $2}')
-          PKG="${DIR}-osx.pkg"
-          curl -fLo /tmp/swift.pkg "https://download.swift.org/${BRANCH}/xcode/${DIR}/${PKG}"
-          sudo installer -pkg /tmp/swift.pkg -target /
-          echo "/Library/Developer/Toolchains/${DIR}.xctoolchain/usr/bin" >> "$GITHUB_PATH"
-
+      # macos-26 ships Xcode 26 with Swift 6.3 native — no need to
+      # side-load a dev snapshot. Earlier attempts on macos-15 +
+      # Swift 6.3 snapshot failed because the snapshot's frontend
+      # couldn't parse the Xcode 16.4 SDK's `simd.swiftmodule`
+      # swiftinterface (`__tg_exp` / `__tg_fabs` etc. — overload
+      # resolution against pre-built interface).
       - name: Verify Swift version
         run: swift --version
 

@@ -94,6 +94,17 @@ import ClaudeCodeIRCCore
         #expect(InputRouter.parse("/leave") == .leave)
     }
 
+    @Test func deleteRoomCommand() {
+        #expect(InputRouter.parse("/delete-room") == .deleteRoom)
+        // Trailing args are tolerated but ignored — the command takes
+        // no parameters, it always operates on the active room.
+        #expect(InputRouter.parse("/delete-room foo") == .deleteRoom)
+    }
+
+    @Test func deleteRoomIsCaseInsensitive() {
+        #expect(InputRouter.parse("/DELETE-ROOM") == .deleteRoom)
+    }
+
     // MARK: - unknown
 
     @Test func unknownCommand() {

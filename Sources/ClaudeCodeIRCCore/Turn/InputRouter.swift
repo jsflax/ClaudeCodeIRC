@@ -34,6 +34,14 @@ public enum InputRouter {
         /// on peer it just disconnects.
         case leave
 
+        /// Leave AND delete the room — same teardown as `.leave`,
+        /// then closes the on-disk Lattice handle and removes the
+        /// `<DATA_DIR>/rooms/<code>.lattice` file. The room
+        /// disappears from the Recent sidebar after this. On host,
+        /// the directory entry is also DELETEd via the publisher's
+        /// stop path before the file is removed.
+        case deleteRoom
+
         /// Host-only. Remove a member from the room by nick. The
         /// host's lattice deletes the target Member row; the delete
         /// syncs to the kicked peer, whose `selfMemberObserver`
@@ -149,6 +157,8 @@ public enum InputRouter {
             return .members
         case "leave":
             return .leave
+        case "delete-room":
+            return .deleteRoom
         case "kick":
             guard !rest.isEmpty else { return .unknown("/kick needs a nick") }
             // Same single-token rule as /nick — the rest of the line
@@ -222,6 +232,7 @@ public enum InputRouter {
         Command(name: "clear",   usage: "/clear",          description: "hide scrollback up to now (local)"),
         Command(name: "palette", usage: "/palette",        description: "pick a UI palette — phosphor / amber / modern / claude"),
         Command(name: "leave",   usage: "/leave",          description: "leave the room"),
+        Command(name: "delete-room", usage: "/delete-room", description: "leave the room AND delete its on-disk lattice"),
         Command(name: "kick",    usage: "/kick <nick>",    description: "host-only — remove a member from the room"),
     ]
 
@@ -248,6 +259,7 @@ public enum InputRouter {
           /clear             hide scrollback up to now (local only)
           /palette           pick a UI palette
           /leave             leave the room
+          /delete-room       leave AND delete the room's on-disk lattice
           /kick <nick>       host-only — remove a member from the room
         trigger Claude:
           @claude <prompt>   mention to ask Claude (case-insensitive)

@@ -713,6 +713,40 @@ public final class RoomsModel {
         await instance.leave()
     }
 
+    /// Leave AND delete the joined room. Same teardown as `leave(_:)`
+    /// (which stops the directory publisher / sync server / driver and
+    /// removes the local Member row), then drops any cached recent-
+    /// lattice handle for the same code and removes the on-disk
+    /// `<rooms>/<code>.lattice` file. The room disappears from the
+    /// Recent sidebar after this.
+    ///
+    /// Joined-only — for v0.0.1 we only support deleting the active
+    /// room (the one the user is in). Recent-only rooms can be
+    /// removed by `scripts/wipe-lattices.sh` or by reopening then
+    /// `/delete-room`.
+    public func deleteRoom(_ roomId: UUID) async {
+        guard let instance = joinedRooms.first(where: { $0.id == roomId }) else {
+            Log.line("rooms", "deleteRoom: no joined instance with id \(roomId)")
+            return
+        }
+        let code = instance.roomCode
+        // `leave(_:)` removes the instance from joinedRooms and runs
+        // the full teardown (publisher DELETE, member-row delete, sync
+        // flush, server.stop). Sync flush matters: peers must observe
+        // our Member row vanish before we yank the file.
+        await leave(roomId)
+        // Drop any recent-lattice cache hit (loadPersistedRooms /
+        // reopenAs* paths can leave a stale handle around) so the
+        // SQLite lock is released before rm.
+        dropRecent(code: code)
+        do {
+            try FileManager.default.removeItem(at: RoomPaths.storeURL(forCode: code))
+            Log.line("rooms", "deleted room \(code)")
+        } catch {
+            Log.line("rooms", "delete room \(code) failed: \(error)")
+        }
+    }
+
     /// Closure handed to each peer `RoomInstance` so it can self-eject
     /// when the host runs `/kick` on it. Tears the instance down via
     /// `leave(_:)` first — that flips `activeRoomId` away from the

@@ -778,7 +778,7 @@ struct WorkspaceView: View {
         if let me = room.selfMember, me.isAway {
             switch intent {
             case .afk: break // explicit toggle — handled below
-            case .empty, .unknown, .leave, .clear, .palette, .host, .join, .reopen, .addGroup, .newGroup: break
+            case .empty, .unknown, .leave, .deleteRoom, .clear, .palette, .host, .join, .reopen, .addGroup, .newGroup: break
             default:
                 me.isAway = false
                 me.awayReason = nil
@@ -807,6 +807,9 @@ struct WorkspaceView: View {
         case .leave:
             let id = room.id
             Task { await model.leave(id) }
+        case .deleteRoom:
+            let id = room.id
+            Task { await model.deleteRoom(id) }
         case .kick(let nick):
             // Host-only. Self-kick aliases to /leave so the host can
             // type either spelling. For everyone else, find the

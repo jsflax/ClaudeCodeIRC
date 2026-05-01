@@ -182,6 +182,57 @@ host_session() {
     sleep 4
 }
 
+# host_public_session <pane> <nick> [room-name]
+#   Same as host_session but submits with the default visibility
+#   (public) — does NOT cycle to private. Pairs with cases that need
+#   the host to advertise via cloudflared + the public directory so
+#   `Session.publicURL` is populated (peer /reopen and the internet
+#   tunnel codepath both depend on this).
+#
+#   Pre-req: cloudflared on PATH. Caller should `command -v cloudflared`
+#   and skip / smoke_die if missing.
+host_public_session() {
+    local pane="$1" nick="$2" room_name="${3:-${nick}-room}"
+    tmux send-keys -t "$SMOKE_SESSION:0.$pane" "$nick" Enter
+    sleep 1
+    tmux send-keys -t "$SMOKE_SESSION:0.$pane" "/nick $nick" Enter
+    sleep 1
+    tmux send-keys -t "$SMOKE_SESSION:0.$pane" "/host" Enter
+    sleep 2
+    tmux send-keys -t "$SMOKE_SESSION:0.$pane" "$room_name"
+    sleep 0.3
+    # Tab × 3 lands on .visibility, but unlike host_session we DON'T
+    # press Space — default index is 1 (public), which is what we want.
+    tmux send-keys -t "$SMOKE_SESSION:0.$pane" Tab; sleep 0.1
+    tmux send-keys -t "$SMOKE_SESSION:0.$pane" Tab; sleep 0.1
+    tmux send-keys -t "$SMOKE_SESSION:0.$pane" Tab; sleep 0.1
+    tmux send-keys -t "$SMOKE_SESSION:0.$pane" Enter
+    # Cloudflare quick-tunnel spin-up takes 5–15s; the host is in
+    # the room before then but `Session.publicURL` lands later.
+    # Cases that depend on publicURL should poll for it.
+    sleep 5
+}
+
+# wait_for_public_url <lattice-file> [timeout-seconds]
+#   Poll `Session.publicURL IS NOT NULL`. Returns 0 + echoes URL on
+#   success, non-zero on timeout. Use after host_public_session.
+wait_for_public_url() {
+    local lat="$1" timeout="${2:-30}"
+    local i=0
+    while [[ $i -lt $timeout ]]; do
+        local url
+        url="$("$SMOKE_SQLITE" "$lat" \
+            "SELECT publicURL FROM Session WHERE publicURL IS NOT NULL LIMIT 1;" 2>/dev/null || echo "")"
+        if [[ -n "$url" ]]; then
+            echo "$url"
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
 # join_session <pane> <nick> <room-name>
 #   nick the user, then run `/join <room-name>` — deterministic match
 #   against the discovered set (Bonjour + directory). Avoids the

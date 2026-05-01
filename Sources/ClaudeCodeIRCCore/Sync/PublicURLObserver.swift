@@ -121,22 +121,10 @@ public final class PublicURLObserver {
         // We can't swap to "no URL" — keep the existing connection alive
         // and wait for the next non-nil value.
         guard let urlString = currentURL,
-              let httpsURL = URL(string: urlString),
-              var components = URLComponents(url: httpsURL, resolvingAgainstBaseURL: false)
+              let url = Self.wssEndpoint(forPublicURL: urlString,
+                                         roomCode: roomInstance.roomCode)
         else {
-            Log.line("public-url-observer", "publicURL cleared; staying on current endpoint")
-            return
-        }
-
-        // Host writes the bare `https://*.trycloudflare.com` origin — the
-        // tunnel tip — onto Session.publicURL. The peer's WS upgrade needs
-        // a `wss://` scheme and the same `/room/<code>` path the host's
-        // RoomSyncServer is bound to. Translate here so swap() always
-        // gets a fully-formed sync endpoint.
-        components.scheme = "wss"
-        components.path = "/room/\(roomInstance.roomCode)"
-        guard let url = components.url else {
-            Log.line("public-url-observer", "could not build wss URL from \(urlString)")
+            Log.line("public-url-observer", "publicURL cleared / unparseable; staying on current endpoint")
             return
         }
 
@@ -150,5 +138,31 @@ public final class PublicURLObserver {
         } catch {
             Log.line("public-url-observer", "swap failed: \(error)")
         }
+    }
+
+    /// Translate a host-written `Session.publicURL`
+    /// (`https://*.trycloudflare.com`) into the fully-formed sync
+    /// endpoint a peer needs (`wss://*.trycloudflare.com/room/<code>`).
+    /// Returns nil for unparseable input or for a `URLComponents` we
+    /// can't reassemble after the scheme + path edits.
+    ///
+    /// Single source of truth for the translation. Used both by the
+    /// observer's `evaluate()` (mid-session tunnel-restart swap) and
+    /// by `WorkspaceView.activateRecent` (`/reopen` after a peer
+    /// crash). Without this helper the two paths drifted: the observer
+    /// translated, the reopen path didn't, and a `/reopen` over the
+    /// tunnel landed the peer on an https-scheme URL with no
+    /// `/room/<code>` path. Lattice's WSS upgrade silently failed and
+    /// sync was dead even though the room looked "live" locally.
+    public static func wssEndpoint(
+        forPublicURL urlString: String,
+        roomCode: String
+    ) -> URL? {
+        guard let httpsURL = URL(string: urlString),
+              var components = URLComponents(url: httpsURL, resolvingAgainstBaseURL: false)
+        else { return nil }
+        components.scheme = "wss"
+        components.path = "/room/\(roomCode)"
+        return components.url
     }
 }

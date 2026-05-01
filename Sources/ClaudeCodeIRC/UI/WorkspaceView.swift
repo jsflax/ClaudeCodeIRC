@@ -1068,7 +1068,19 @@ struct WorkspaceView: View {
                 catch { feedback("reopen as host failed: \(error)", room: currentRoom) }
             }
         } else {
-            guard let urlStr = s.publicURL, let url = URL(string: urlStr) else {
+            // `Session.publicURL` is the host's bare tunnel origin
+            // (`https://*.trycloudflare.com`). Lattice's sync client
+            // expects a `wss://` scheme + the `/room/<code>` path the
+            // host's RoomSyncServer is bound to. Use the same helper
+            // `PublicURLObserver` uses for tunnel-restart swaps so
+            // both paths produce identical endpoints. Without this,
+            // /reopen over the tunnel landed bob on an https-scheme
+            // URL: the room appeared open locally but the WSS upgrade
+            // never happened and sync was silently dead.
+            guard let urlStr = s.publicURL,
+                  let url = PublicURLObserver.wssEndpoint(
+                    forPublicURL: urlStr, roomCode: code)
+            else {
                 feedback("can't reopen as peer: no cached endpoint (host may be offline; rejoin via lobby)",
                          room: currentRoom)
                 return

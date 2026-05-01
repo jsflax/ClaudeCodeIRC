@@ -94,6 +94,21 @@ struct AskQuestionCardView: View {
         }
     }
 
+    /// Time `Array(question.comments)` — `List<T>` is link-table backed,
+    /// so this materialization runs a SQL fetch. If the discussion is
+    /// the perf hotspot we'll see it here.
+    private func timedCommentsFetch() -> [AskComment] {
+        let t0 = Date()
+        let arr = Array(question.comments)
+        let dt = Date().timeIntervalSince(t0) * 1000
+        if dt > 2 {
+            Log.line("perf",
+                     "discussionBlock comments-fetch \(String(format: "%.1f", dt))ms " +
+                     "n=\(arr.count)")
+        }
+        return arr
+    }
+
     /// Inline thread + composer. Always rendered for `.pending`
     /// questions so the affordance is discoverable even when the
     /// thread is empty. Tab toggles focus between the option list and
@@ -102,10 +117,11 @@ struct AskQuestionCardView: View {
     @ViewBuilder
     private var discussionBlock: some View {
         if question.status == .pending {
+            let commentsArray = timedCommentsFetch()
             SpacerView(1)
             let dividerRole: Palette.Role = discussionFocused ? .accent : .dim
             Text("─── discussion ───").paletteColor(dividerRole)
-            ForEach(Array(question.comments)) { c in
+            ForEach(commentsArray) { c in
                 let nick = c.author?.nick ?? "?"
                 Text("  <\(nick)> ").foregroundColor(NickColor.color(for: nick))
                     + Text(c.text).foregroundColor(.dim)
@@ -290,18 +306,34 @@ struct AskQuestionCardView: View {
 
     // MARK: - Tally helpers
 
-    /// Filter the top-level `@Query var allAskVotes` by this question
-    /// — does the same job as `question.votes` (the `@Relation`
-    /// backlink) but **reads** the `@Query` wrapper, so NCursesUI's
-    /// observation tracker subscribes the view to vote
-    /// inserts/updates. Reading the backlink alone doesn't subscribe
-    /// (the relation traversal returns rows but bypasses the
-    /// wrapper's `value` getter), so vote arrivals during the
-    /// pending phase didn't trigger a re-render — the count only
-    /// refreshed when the question terminated.
+    /// Votes attached to this question. Uses the `@Relation` backlink
+    /// `question.votes` rather than filtering the top-level
+    /// `@Query var allAskVotes`. Two reasons:
+    ///
+    /// 1. **Crash safety.** Filtering allAskVotes via
+    ///    `$0.question?.globalId == qid` dereferences every vote's
+    ///    `question` link on every render. If any vote's link target
+    ///    is in a transient state (sync race, mid-INSERT, evicted
+    ///    cache), `dynamic_object::get_object` faults on a null
+    ///    `cached_object_`. The backlink reads link-table rows
+    ///    directly without a per-vote pointer chase.
+    ///
+    /// 2. **Performance.** This getter is called multiple times per
+    ///    card render (optionRow × N options + votersFor + uniqueBallotVoters
+    ///    + isLabelChecked) — N filter passes over the global vote
+    ///    table per frame. The backlink is a single indexed query.
+    ///
+    /// `allAskVotes` is still declared at the top of the view so the
+    /// `@Query` wrapper subscribes the view to vote inserts/updates;
+    /// we just don't iterate it here. (Reading the wrapper for its
+    /// observation side-effect is enough — even if the variable is
+    /// "unused" in this method, NCursesUI's tracker has already taken
+    /// the dependency.)
     private func votesForQuestion() -> [AskVote] {
-        guard let qid = question.globalId else { return [] }
-        return allAskVotes.filter { $0.question?.globalId == qid }
+        _ = allAskVotes   // observation dependency — see above; just
+                          // touching the @Query wrapper subscribes the
+                          // view, no SQL needed.
+        return Array(question.votes)
     }
 
     /// True when this client should render `[x]` for `label`. For

@@ -107,39 +107,22 @@ struct WorkspaceView: View {
         // sequential rule prevents two cards being interactive at
         // once. If multiple groups are stacked (unlikely under -p
         // serialisation), the earliest by requestedAt wins.
-        let activeFile = model.activeRoom?.lattice.configuration.fileURL.lastPathComponent ?? "nil"
-        // Enumerate every AskQuestion the @Query holds — by globalId
-        // prefix, status, and groupIndex/groupSize. Across a
-        // multi-question ask the peer should see N rows and the
-        // status of the previously-answered ones must read
-        // `.answered` so the sort/filter advances. This trace makes
-        // it obvious whether (a) the rows didn't sync, (b) they
-        // synced but stuck at `.pending`, or (c) the filter logic
-        // itself is wrong.
-        var summary: [String] = []
-        for q in askQuestions {
-            let gid = q.globalId?.uuidString.prefix(8) ?? "?"
-            summary.append("\(gid):g\(q.groupIndex)/\(q.groupSize):\(q.status)")
-        }
-        Log.line(
-            "workspace",
-            "pendingAskQuestion getter activeRoomLattice=\(activeFile) all=[\(summary.joined(separator: " "))]")
-        let pending = askQuestions.filter { $0.status == .pending }
-        let chosen = pending
-            .sorted { lhs, rhs in
-                if lhs.requestedAt != rhs.requestedAt {
-                    return lhs.requestedAt < rhs.requestedAt
-                }
-                return lhs.groupIndex < rhs.groupIndex
+        //
+        // Single-pass over the @Query result rather than
+        // filter().sorted().first — this getter is read on every
+        // render frame, sometimes multiple times (askCardActive,
+        // inputFocusBinding, centerPane). filter+sort allocated two
+        // intermediate arrays per call and dominated render time
+        // post-question.
+        var best: AskQuestion?
+        for q in askQuestions where q.status == .pending {
+            guard let cur = best else { best = q; continue }
+            if q.requestedAt < cur.requestedAt
+                || (q.requestedAt == cur.requestedAt && q.groupIndex < cur.groupIndex) {
+                best = q
             }
-            .first
-        if let chosen {
-            let gid = chosen.globalId?.uuidString.prefix(8) ?? "?"
-            Log.line("workspace", "pendingAskQuestion → \(gid) groupIndex=\(chosen.groupIndex)")
-        } else {
-            Log.line("workspace", "pendingAskQuestion → nil")
         }
-        return chosen
+        return best
     }
 
     /// Oldest `.pending` approval — Y/A/D on the host flips its status.

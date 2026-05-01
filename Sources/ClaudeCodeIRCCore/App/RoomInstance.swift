@@ -642,6 +642,25 @@ public final class RoomInstance: Identifiable {
             !isHost,
             "RoomInstance.swap() is peer-only; the host's local server is unaffected by tunnel-URL changes")
         let oldFile = lattice.configuration.fileURL.lastPathComponent
+
+        // No-op when the target matches the current connection. Reopening
+        // the Lattice for an unchanged endpoint leaves every cached
+        // `TableResults` in `@Query` wrappers pointing at the closed
+        // C++ `swift_lattice` (Configuration-equality bind-skip in
+        // Query.swift), and the next `RoomPane.body` read crashes in
+        // `database::query` with a null `db_`. This guard keeps callers
+        // (PeerReconnectMonitor in particular) from triggering that
+        // teardown when nothing has actually changed.
+        let currentEndpoint = lattice.configuration.wssEndpoint
+        let currentAuth = lattice.configuration.authorizationToken
+        let incomingAuth = joinCode ?? RoomStore.openRoomBearer
+        if currentEndpoint == endpoint && currentAuth == incomingAuth {
+            Log.line(
+                "room-instance",
+                "swap NO-OP — endpoint+joinCode match current connection (\(oldFile))")
+            return
+        }
+
         Log.line(
             "room-instance",
             "swap ENTER → \(endpoint.absoluteString) joinCode=\(joinCode != nil ? "present" : "nil") oldLattice=\(oldFile)")

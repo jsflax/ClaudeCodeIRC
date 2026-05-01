@@ -130,6 +130,19 @@ public actor PeerReconnectMonitor {
     /// values captured at schedule time — so a `swap()` that updates
     /// the target between scheduling and firing doesn't reconnect to
     /// the stale URL.
+    ///
+    /// Note: `swap()` short-circuits when the target matches the current
+    /// Lattice's connection (see `RoomInstance.swap`). Because this
+    /// monitor's `endpoint`/`joinCode` are re-armed from each successful
+    /// swap, calling `swap()` here for a same-URL stall is a no-op — the
+    /// "reconnect on the same URL" case the monitor was originally
+    /// written for is currently not handled (closing+reopening the
+    /// Lattice was crashing on cached `@Query` results). The narrow path
+    /// — kicking just the WSS sync client without tearing down Lattice —
+    /// needs a `Lattice.reconnectSync()` API that doesn't exist yet.
+    /// Tracked as a follow-up; tunnel-URL-rotation reconnects (the only
+    /// case where endpoint actually changes) still work via
+    /// `PublicURLObserver`.
     private func performReconnect() async {
         guard let owner else { return }
         let currentEndpoint = endpoint

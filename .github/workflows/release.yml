@@ -14,12 +14,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # macos-26 ships Xcode 26 with Swift 6.3 native — no need to
-      # side-load a dev snapshot. Earlier attempts on macos-15 +
-      # Swift 6.3 snapshot failed because the snapshot's frontend
-      # couldn't parse the Xcode 16.4 SDK's `simd.swiftmodule`
-      # swiftinterface (`__tg_exp` / `__tg_fabs` etc. — overload
-      # resolution against pre-built interface).
+      # macos-26's default Xcode is 26.2 (Swift 6.2.3), but the
+      # runner ships several newer Xcodes alongside. Xcode 26.4.1
+      # bundles Swift 6.3 — what ClaudeCodeIRC + Lattice declare —
+      # so xcode-select to it instead of downloading a dev snapshot
+      # every run.
+      - name: Select Xcode 26.4.1 (Swift 6.3)
+        run: sudo xcode-select -switch /Applications/Xcode_26.4.1.app
+
       - name: Verify Swift version
         run: swift --version
 

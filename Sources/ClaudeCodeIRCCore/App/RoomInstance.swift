@@ -167,6 +167,20 @@ public final class RoomInstance: Identifiable {
     /// Re-entrancy guard so two near-simultaneous Member.delete
     /// observer fires don't both kick off `onKickedFromHost`.
     private var kickInProgress: Bool = false
+    /// Re-entrancy guard for `onHostLeft` — separate from `kickInProgress`
+    /// because a host-left can race a self-delete observation in either
+    /// order, and each needs its own once-only fire.
+    private var hostLeaveInProgress: Bool = false
+    /// Peer-only. Cached during `linkToSession` so we can detect when
+    /// the host's Member row is deleted from the synced state without
+    /// having to re-traverse `session.host` (the link accessor SIGSEGVs
+    /// on a dangling target — exactly the state we're trying to detect).
+    private var hostMemberGlobalId: UUID?
+    /// Peer-only. Snapshot of `session.name` taken in `linkToSession`
+    /// so the host-left notice can show the friendly name even after
+    /// `ejectIfHostDeleted` nils `session` to keep dying-link renders
+    /// out of the view tree.
+    public private(set) var cachedSessionName: String?
     /// Wired by `RoomsModel` after the peer factory returns. Called
     /// once on the MainActor when this instance detects its own
     /// `selfMember` row was deleted from the synced state by the host
@@ -174,6 +188,12 @@ public final class RoomInstance: Identifiable {
     /// the user-facing system message and tearing the instance down
     /// via `leave(_:)`. Held by reference; set to `nil` in `leave()`.
     public var onKickedFromHost: ((UUID) async -> Void)?
+    /// Peer-only. Wired by `RoomsModel` like `onKickedFromHost`. Fires
+    /// once when the host's Member row is deleted from the synced
+    /// state — i.e. the host ran `/leave`. The handler tears the
+    /// instance down and posts a "host left" notice. Set to `nil` in
+    /// `leave()`.
+    public var onHostLeft: ((UUID) async -> Void)?
 
     /// Opens a fresh peer-side `Lattice` against a new endpoint when
     /// `swap()` runs. Injected so tests substitute a path-controlled
@@ -374,6 +394,13 @@ public final class RoomInstance: Identifiable {
         Log.line("room-peer", "linkToSession name=\(session.name) code=\(session.code)")
         self.session = session
         selfMember?.session = session
+        // Cache the host's globalId while the link is alive — once the
+        // host runs `/leave` and that row's delete syncs in, we can't
+        // safely traverse `session.host` again. See `ejectIfHostDeleted`.
+        if !isHost {
+            self.hostMemberGlobalId = session.host?.globalId
+            self.cachedSessionName = session.name
+        }
     }
 
     /// How often `MemberHeartbeat` writes `selfMember.lastSeenAt`.
@@ -446,7 +473,9 @@ public final class RoomInstance: Identifiable {
             @Sendable [weak self] change in
             guard case .delete = change else { return }
             Task { @MainActor [weak self] in
-                self?.ejectIfSelfDeleted()
+                guard let self else { return }
+                self.ejectIfSelfDeleted()
+                self.ejectIfHostDeleted()
             }
         }
     }
@@ -466,6 +495,28 @@ public final class RoomInstance: Identifiable {
         Task { await handler?(roomId) }
     }
 
+    /// Peer-only. Mirrors `ejectIfSelfDeleted` but for the host's
+    /// row: when the host runs `/leave`, their `delete(me)` syncs
+    /// over WS, the row vanishes from the peer's lattice, and any
+    /// link traversing `session.host` (or `ChatMessage.author` when
+    /// the author was the host) walks into a freed C++
+    /// `dynamic_object` and SIGSEGVs. Detecting it here lets the
+    /// peer tear down before SwiftUI re-renders any dead-link view.
+    private func ejectIfHostDeleted() {
+        guard !hostLeaveInProgress, !isHost else { return }
+        guard let id = hostMemberGlobalId else { return }
+        guard lattice.object(Member.self, globalId: id) == nil else { return }
+        hostLeaveInProgress = true
+        let roomId = self.id
+        let handler = onHostLeft
+        // Drop the @Observable references first — SwiftUI views that
+        // were observing them will re-evaluate with `nil` and short-
+        // circuit before the async leave runs.
+        selfMember = nil
+        session = nil
+        Task { await handler?(roomId) }
+    }
+
     public func leave() async {
         if let heartbeat { await heartbeat.stop() }
         heartbeat = nil
@@ -474,6 +525,7 @@ public final class RoomInstance: Identifiable {
         selfMemberObserver?.cancel()
         selfMemberObserver = nil
         onKickedFromHost = nil
+        onHostLeft = nil
         // Persist the leave by removing our Member row before tearing
         // down the sync transport. The local audit log entry is
         // durable; on the host it propagates through the relay task

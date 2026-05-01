@@ -647,6 +647,7 @@ public final class RoomsModel {
             joinCode: joinCode,
             prefs: prefs)
         instance.onKickedFromHost = makeKickedHandler()
+        instance.onHostLeft = makeHostLeftHandler()
         joinedRooms.append(instance)
         activeRoomId = instance.id
         return instance
@@ -680,6 +681,7 @@ public final class RoomsModel {
             joinCode: joinCode,
             prefs: prefs)
         instance.onKickedFromHost = makeKickedHandler()
+        instance.onHostLeft = makeHostLeftHandler()
         joinedRooms.append(instance)
         activeRoomId = instance.id
         return instance
@@ -726,6 +728,30 @@ public final class RoomsModel {
                 .session?.name ?? "the room"
             await self.leave(roomId)
             self.pendingNotice = "you were kicked from \(name)"
+        }
+    }
+
+    /// Closure handed to each peer `RoomInstance` so it can self-eject
+    /// when the host runs `/leave` and the host's Member row delete
+    /// syncs in. Same shape as `makeKickedHandler`: tear down via
+    /// `leave(_:)` (which flips `activeRoomId` synchronously) and
+    /// then post a notice. Reading `session?.name` here happens
+    /// before `leave(_:)` runs, but the host-left observer already
+    /// nilled out `session` to keep SwiftUI from re-rendering dead
+    /// links — so use the stored room code as the user-facing label.
+    private func makeHostLeftHandler() -> (UUID) async -> Void {
+        return { [weak self] roomId in
+            guard let self else { return }
+            // `session` was nilled by `ejectIfHostDeleted` to keep
+            // SwiftUI from rendering dead links, so use the snapshot
+            // captured in `linkToSession`. Fall back to the room
+            // code if the snapshot was never taken.
+            let instance = self.joinedRooms.first(where: { $0.id == roomId })
+            let label = instance?.cachedSessionName
+                ?? instance?.roomCode
+                ?? "the room"
+            await self.leave(roomId)
+            self.pendingNotice = "host left \(label) — room closed"
         }
     }
 

@@ -25,6 +25,8 @@ CASES=(
     "c9:c9-keystroke-latency.sh:perf non-regression — keystroke latency"
     "c10:c10-first-run-nick.sh:first-run nick picker overlay"
     "c11:c11-auto-diff.sh:Edit/Write diff renders in auto mode (post-exec resultMeta)"
+    "c12:c12-peer-crash-rejoin.sh:peer crash + /reopen over Cloudflare Tunnel"
+    "c13:c13-utf8-input.sh:UTF-8 input in chat composer (accents + emoji)"
 )
 
 # Optional case filter — if args are passed, only run those cases.

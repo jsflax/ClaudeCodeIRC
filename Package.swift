@@ -50,9 +50,12 @@ let package = Package(
             name: "ClaudeCodeIRCE2ETests",
             dependencies: [
                 "ClaudeCodeIRC",  // executable — depending on it triggers the build
+                "ClaudeCodeIRCCore",  // schema types (Member, Turn, AskQuestion) + RoomStore.schema
                 .product(name: "NCUITest", package: "NCursesUI"),
                 .product(name: "NCUITestProtocol", package: "NCursesUI"),
-            ]
+                .product(name: "Lattice", package: "lattice"),
+            ],
+            swiftSettings: [.interoperabilityMode(.Cxx)]
         ),
     ]
 )

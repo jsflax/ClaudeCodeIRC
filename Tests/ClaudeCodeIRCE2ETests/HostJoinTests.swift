@@ -3,22 +3,6 @@ import Foundation
 import NCUITest
 import NCUITestProtocol
 
-/// Convenience initializer scoped to ClaudeCodeIRC. Tests get isolated
-/// per-app data directories under $TMPDIR so they can run in parallel.
-extension NCUIApplication {
-    static func ccirc(label: String) -> NCUIApplication {
-        let dataDir = (NSTemporaryDirectory() as NSString)
-            .appendingPathComponent("ccirc-e2e-\(label)-\(UUID().uuidString.prefix(6))")
-        // Wipe any prior remnant so room state is clean.
-        try? FileManager.default.removeItem(atPath: dataDir)
-        return NCUIApplication(
-            label: label,
-            productName: "claudecodeirc",
-            launchEnvironment: ["CCIRC_DATA_DIR": dataDir]
-        )
-    }
-}
-
 @Suite("ClaudeCodeIRC e2e — proof of life", .serialized)
 struct ProofOfLifeTests {
     @Test("launch claudecodeirc and observe initial UI")

@@ -423,6 +423,7 @@ public final class RoomsModel {
             directoryPublisher: directoryPublisher,
             statusLineDriver: statusLineDriver)
         joinedRooms.append(instance)
+        wireBell(instance)
         activeRoomId = instance.id
         return instance
     }
@@ -649,6 +650,7 @@ public final class RoomsModel {
         instance.onKickedFromHost = makeKickedHandler()
         instance.onHostLeft = makeHostLeftHandler()
         joinedRooms.append(instance)
+        wireBell(instance)
         activeRoomId = instance.id
         return instance
     }
@@ -683,6 +685,7 @@ public final class RoomsModel {
         instance.onKickedFromHost = makeKickedHandler()
         instance.onHostLeft = makeHostLeftHandler()
         joinedRooms.append(instance)
+        wireBell(instance)
         activeRoomId = instance.id
         return instance
     }
@@ -786,6 +789,20 @@ public final class RoomsModel {
                 ?? "the room"
             await self.leave(roomId)
             self.pendingNotice = "host left \(label) — room closed"
+        }
+    }
+
+    /// Wire `instance.onForeignMessage` so a non-self user/action
+    /// message in a non-active room writes BEL to stderr — the user's
+    /// terminal flashes / beeps. Kept silent for the active room (the
+    /// user is already looking at it) and for self-authored / system /
+    /// assistant content (filtered upstream in `RoomInstance`).
+    private func wireBell(_ instance: RoomInstance) {
+        instance.onForeignMessage = { [weak self, weak instance] in
+            guard let self, let instance else { return }
+            if self.activeRoomId != instance.id {
+                FileHandle.standardError.write(Data([0x07]))
+            }
         }
     }
 

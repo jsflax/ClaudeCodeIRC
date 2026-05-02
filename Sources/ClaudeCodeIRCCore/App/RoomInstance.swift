@@ -123,7 +123,22 @@ public final class RoomInstance: Identifiable {
     /// (process killed, network dropped) as `isAway = true` so they
     /// stop blocking quorum. Stopped in `leave()`.
     private var presenceSweeper: MemberPresenceSweeper?
-    private var chatObserver: AnyCancellable?
+    /// Observes ChatMessage inserts. Two responsibilities:
+    /// (1) host-only — forward each row's globalId to TurnManager so it
+    /// can decide whether to fire the driver. (2) anyone — fire
+    /// `onForeignMessage` for non-self user/action messages newer than
+    /// `messageCutoff`, used by `RoomsModel` to bell the terminal when
+    /// a non-active room receives traffic.
+    private var messageObserver: AnyCancellable?
+    /// Wall-clock at observer start. Filters historical messages
+    /// streamed during initial catch-up out of the bell path so a
+    /// fresh peer joining a long-running room doesn't get a flood.
+    private let messageCutoff: Date = Date()
+    /// Set by `RoomsModel` after each `joinedRooms.append`. Fires on
+    /// foreign user/action messages; the model decides whether to bell
+    /// based on `activeRoomId`. `nil` while the instance is in flight
+    /// before `RoomsModel` wires it.
+    public var onForeignMessage: (() -> Void)?
     /// Host-only. Watches `Turn.cancelRequested` flips so anyone in
     /// the room (including a peer that ESC'd, propagating via sync)
     /// can interrupt the in-flight `claude` subprocess. Reset in
@@ -239,7 +254,7 @@ public final class RoomInstance: Identifiable {
             directoryPublisher: directoryPublisher,
             joinedViaTunnel: false,
             peerLatticeStore: peerLatticeStore)
-        instance.startChatObserver()
+        instance.startMessageObserver()
         instance.startCancelObserver()
         instance.startHeartbeat()
         instance.startPresenceSweeper()
@@ -323,6 +338,7 @@ public final class RoomInstance: Identifiable {
         instance.startPeerCatchUp(roomCode: roomCode)
         instance.startHeartbeat()
         instance.startSelfMemberObserver()
+        instance.startMessageObserver()
         instance.publicURLObserver = PublicURLObserver(roomInstance: instance)
         instance.installReconnectMonitor()
         return instance
@@ -542,7 +558,7 @@ public final class RoomInstance: Identifiable {
             await awaitSyncFlush(deadline: 1.5)
         }
         catchUpTask?.cancel()
-        chatObserver?.cancel()
+        messageObserver?.cancel()
         cancelObserver?.cancel()
         turnStatusObserver?.cancel()
         permissionModeObserver?.cancel()
@@ -672,8 +688,8 @@ public final class RoomInstance: Identifiable {
         // Cancel observers / tasks tied to the old Lattice.
         catchUpTask?.cancel()
         catchUpTask = nil
-        chatObserver?.cancel()
-        chatObserver = nil
+        messageObserver?.cancel()
+        messageObserver = nil
 
         // Drop model references *before* close. `self` is `@Observable`,
         // so any later assignment to `selfMember` or `session` triggers
@@ -724,6 +740,12 @@ public final class RoomInstance: Identifiable {
         // Re-attach the publicURL observer to the new Lattice instance.
         // Old observer's AnyCancellable drops here.
         self.publicURLObserver = PublicURLObserver(roomInstance: self)
+        // Re-arm the multi-purpose ChatMessage observer on the new
+        // Lattice. Same `messageCutoff` filter still applies — historical
+        // rows replayed during catch-up are stamped with their original
+        // createdAt and stay older than the cutoff captured at instance
+        // creation.
+        startMessageObserver()
         // Re-arm the reconnect monitor on the new Lattice. The OLD
         // C++-side handler context was released when `lattice.close()`
         // ran above, so any in-flight callback for the closed Lattice
@@ -817,30 +839,51 @@ public final class RoomInstance: Identifiable {
         cancelInProgress = false
     }
 
-    // MARK: - Host-side chat observer → TurnManager
+    // MARK: - ChatMessage insert observer
 
-    /// Host-only. Every `ChatMessage` insert (local write or peer
-    /// upload) forwards to TurnManager.ingest. The manager decides
-    /// whether to buffer, fire the driver, or queue for after the
-    /// current turn. Filtering — .side, .system, assistant-authored
-    /// messages — happens inside TurnManager.
-    private func startChatObserver() {
-        guard turnManager != nil else { return }
-        Log.line("room-host", "turn-manager chat observer starting")
-        chatObserver = lattice.observe(ChatMessage.self) { @Sendable [weak self] change in
+    /// Wires the multi-purpose ChatMessage observer. Two consumers:
+    /// (1) host-only — forward each new row's globalId to
+    /// `TurnManager.ingest`, so it can decide whether to fire the
+    /// driver. Per-row filtering (.side / .system / assistant-authored)
+    /// happens inside TurnManager.
+    /// (2) anyone — fire `onForeignMessage` for non-self user/action
+    /// messages newer than `messageCutoff`. RoomsModel sets that
+    /// callback to bell the terminal when a non-active room receives
+    /// traffic.
+    private func startMessageObserver() {
+        Log.line("room", "message observer starting (host=\(self.isHost))")
+        messageObserver = lattice.observe(ChatMessage.self) { @Sendable [weak self] change in
             guard case .insert(let rowId) = change else { return }
-            Task { [weak self] in
-                await self?.forwardToTurnManager(rowId: rowId)
+            Task { @MainActor [weak self] in
+                self?.handleMessageInsert(rowId: rowId)
             }
         }
     }
 
-    private func forwardToTurnManager(rowId: Int64) async {
+    @MainActor
+    private func handleMessageInsert(rowId: Int64) {
         guard let msg = lattice.object(ChatMessage.self, primaryKey: rowId),
-              let gid = msg.globalId,
-              let turnManager
+              let gid = msg.globalId
         else { return }
-        await turnManager.ingest(globalId: gid)
+        // (1) Host turn-manager dispatch.
+        if turnManager != nil {
+            Task { [weak self] in
+                await self?.forwardToTurnManager(globalId: gid)
+            }
+        }
+        // (2) Foreign-message bell. Skip catch-up replays, system /
+        // assistant rows, and self-authored inserts.
+        guard msg.createdAt > messageCutoff,
+              msg.kind == .user || msg.kind == .action,
+              let myId = selfMember?.globalId,
+              msg.author?.globalId != myId
+        else { return }
+        onForeignMessage?()
+    }
+
+    private func forwardToTurnManager(globalId: UUID) async {
+        guard let turnManager else { return }
+        await turnManager.ingest(globalId: globalId)
     }
 
     // MARK: - Host-side statusLine triggers

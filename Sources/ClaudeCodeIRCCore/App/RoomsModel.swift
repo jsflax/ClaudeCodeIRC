@@ -792,17 +792,25 @@ public final class RoomsModel {
         }
     }
 
-    /// Wire `instance.onForeignMessage` so a non-self user/action
-    /// message in a non-active room writes BEL to stderr — the user's
-    /// terminal flashes / beeps. Kept silent for the active room (the
-    /// user is already looking at it) and for self-authored / system /
-    /// assistant content (filtered upstream in `RoomInstance`).
+    /// Optional bell hook — UI layer sets this at construction to
+    /// route foreign-message events to the terminal bell. Kept as a
+    /// callback (rather than RoomsModel writing BEL itself) so Core
+    /// stays free of UI / terminfo dependencies; raw `\u{07}` writes
+    /// also got swallowed by tmux pane bell handling and ncurses
+    /// output buffering, whereas the UI's `Term.bell()` goes through
+    /// terminfo via ncurses' `beep()`.
+    public var onShouldBell: (() -> Void)?
+
+    /// Wire `instance.onForeignMessage` so any non-self user/action
+    /// message invokes `onShouldBell`. No active-room gating —
+    /// `Term.bell()` fires unconditionally even when the user is
+    /// already looking at the chat. Cheaper and simpler than focus
+    /// detection; can be revisited if it gets noisy.
     private func wireBell(_ instance: RoomInstance) {
         instance.onForeignMessage = { [weak self, weak instance] in
             guard let self, let instance else { return }
-            if self.activeRoomId != instance.id {
-                FileHandle.standardError.write(Data([0x07]))
-            }
+            Log.line("bell", "ring (room=\(instance.roomCode))")
+            self.onShouldBell?()
         }
     }
 

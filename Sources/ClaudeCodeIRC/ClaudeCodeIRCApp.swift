@@ -5,7 +5,16 @@ import NCursesUI
 
 struct RootView: View {
     @Environment(\.screen) var screen
-    @State private var model: RoomsModel = RoomsModel()
+    @State private var model: RoomsModel = {
+        let m = RoomsModel()
+        // Route foreign-message events to the terminal bell. Lives in
+        // the UI layer (not RoomsModel itself) because Core has no
+        // ncurses dependency and a raw stderr BEL gets swallowed by
+        // tmux/curses output buffering — Term.bell() goes through
+        // terminfo via ncurses' beep().
+        m.onShouldBell = { Term.bell() }
+        return m
+    }()
 
     var body: some View {
         // Env modifier must live OUTSIDE WorkspaceView so that by the

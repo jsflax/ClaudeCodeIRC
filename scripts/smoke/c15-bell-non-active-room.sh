@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# C15 — terminal bell on inbound message in a non-active room.
+# C15 — terminal bell on any inbound non-self message.
 #
-# bob hosts a SECOND room after joining alice's, making the second
-# room his active. alice then sends a message into the first room.
-# bob's stderr should receive a BEL byte (0x07), since the message
-# landed in his non-active room.
+# `RoomsModel.wireBell` fires unconditionally for foreign user/action
+# messages (no active-room gate) — alice's send into a-room should
+# bell bob's terminal both when he's on b-room and when he's on
+# a-room itself.
 #
-# To verify the bell, the panes redirect stderr to a per-user log
-# file (the default `setup_3p` doesn't), then we grep the log for
-# the BEL byte.
+# Verification: each ring writes a `bell ring` Log line. We grep the
+# shared ccirc.log for it. Direct BEL-byte capture isn't reliable
+# because beep() goes through the curses output buffer, not stderr.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,20 +17,14 @@ smoke_init "c15"
 
 ARTIFACTS="/tmp/ccirc-smoke-c15"
 mkdir -p "$ARTIFACTS"
-ALICE_STDERR="$ARTIFACTS/alice.stderr"
-BOB_STDERR="$ARTIFACTS/bob.stderr"
-: > "$ALICE_STDERR"
-: > "$BOB_STDERR"
 
-echo "=== phase 1: 2-pane setup with stderr redirected ==="
-# Custom 2-pane spawn — same shape as setup_3p but only 2 panes and
-# each pane's stderr is captured to a file so we can grep for BEL.
+echo "=== phase 1: 2-pane setup ==="
 tmux new-session -d -s "$SMOKE_SESSION" -x 270 -y 60
 tmux split-window -h -t "$SMOKE_SESSION:0.0"
 tmux send-keys -t "$SMOKE_SESSION:0.0" \
-    "CCIRC_DATA_DIR='$ALICE_DIR' '$SMOKE_BIN' 2>'$ALICE_STDERR'" C-m
+    "CCIRC_DATA_DIR='$ALICE_DIR' '$SMOKE_BIN'" C-m
 tmux send-keys -t "$SMOKE_SESSION:0.1" \
-    "CCIRC_DATA_DIR='$BOB_DIR' '$SMOKE_BIN' 2>'$BOB_STDERR'" C-m
+    "CCIRC_DATA_DIR='$BOB_DIR' '$SMOKE_BIN'" C-m
 sleep 4
 
 echo
@@ -73,9 +67,11 @@ BOB_AFTER_HOST="$(capture_pane 1)"
 capture_pane_to 1 "$ARTIFACTS/bob-after-host.txt"
 assert_contains "bob's active room is b-room" "[$ROOM_B]" "$BOB_AFTER_HOST"
 
-# Truncate bob's stderr AFTER all setup completes — any stray BELs
-# produced during the host flow shouldn't count toward the assertion.
-: > "$BOB_STDERR"
+# Snapshot the log line count so we can scope subsequent assertions
+# to *new* bell rings only — the host flow may produce its own bells
+# if any pre-existing rooms trip the foreign-message hook.
+LOG_BASELINE="$( { grep "\[bell\] ring" "$SMOKE_LOG" 2>/dev/null || true; } | wc -l | tr -d ' ')"
+echo "  log baseline 'bell ring' count = $LOG_BASELINE"
 
 echo
 echo "=== phase 4: alice sends a message in a-room → bob should bell ==="
@@ -85,27 +81,28 @@ tmux send-keys -t "$SMOKE_SESSION:0.0" "$BELL_MSG" Enter
 # round-trip + observer fire is well under 1s on loopback.
 sleep 2
 
-# Grep for BEL byte (0x07) in bob's stderr capture.
-BELL_COUNT="$(LC_ALL=C tr -cd '\007' < "$BOB_STDERR" | wc -c | tr -d ' ')"
-echo "  bob.stderr BEL byte count = $BELL_COUNT"
-assert_ge "bob received at least 1 BEL byte" 1 "$BELL_COUNT"
+LOG_AFTER="$( { grep "\[bell\] ring" "$SMOKE_LOG" 2>/dev/null || true; } | wc -l | tr -d ' ')"
+NEW_RINGS=$(( LOG_AFTER - LOG_BASELINE ))
+echo "  new 'bell ring' log entries = $NEW_RINGS"
+assert_ge "bell rang for non-active room" 1 "$NEW_RINGS"
 
 echo
-echo "=== phase 5: bob switches to a-room → message there is silent ==="
+echo "=== phase 5: bob switches to a-room → bell still fires (no gate) ==="
 # Ctrl+P cycles back to a-room (bob's other joined room).
 tmux send-keys -t "$SMOKE_SESSION:0.1" C-p
 sleep 1
-: > "$BOB_STDERR"
+LOG_BASELINE_2="$( { grep "\[bell\] ring" "$SMOKE_LOG" 2>/dev/null || true; } | wc -l | tr -d ' ')"
 
-# alice sends another message; this one should NOT bell because
-# a-room is now bob's active room.
-SILENT_MSG="silent-c15"
-tmux send-keys -t "$SMOKE_SESSION:0.0" "$SILENT_MSG" Enter
+# alice sends another message; with the active-room gate dropped
+# this should ALSO bell — bell fires for any non-self message.
+ACTIVE_MSG="active-c15"
+tmux send-keys -t "$SMOKE_SESSION:0.0" "$ACTIVE_MSG" Enter
 sleep 2
 
-SILENT_BELL_COUNT="$(LC_ALL=C tr -cd '\007' < "$BOB_STDERR" | wc -c | tr -d ' ')"
-echo "  bob.stderr BEL byte count (active room) = $SILENT_BELL_COUNT"
-assert_eq "active room is silent" 0 "$SILENT_BELL_COUNT"
+LOG_AFTER_2="$( { grep "\[bell\] ring" "$SMOKE_LOG" 2>/dev/null || true; } | wc -l | tr -d ' ')"
+ACTIVE_RINGS=$(( LOG_AFTER_2 - LOG_BASELINE_2 ))
+echo "  new 'bell ring' log entries while active = $ACTIVE_RINGS"
+assert_ge "bell rings even in active room" 1 "$ACTIVE_RINGS"
 
 echo
 smoke_finish

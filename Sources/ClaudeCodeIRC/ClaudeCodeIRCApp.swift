@@ -64,6 +64,12 @@ struct ClaudeCodeIRCApp: App {
                 """.utf8))
             exit(1)
         }
+        // Background self-update — silent, non-blocking. The current
+        // process keeps running on its already-loaded inode; any new
+        // binary written to disk takes effect the next time the user
+        // launches `claudecodeirc`. See `Updater.swift` for skip gates
+        // (dev builds, brew installs, opt-out env vars).
+        Updater.runInBackground(currentVersion: Version.current)
         let app = Self.init()
         app.body.run()
     }

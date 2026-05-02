@@ -25,6 +25,15 @@ jobs:
       - name: Verify Swift version
         run: swift --version
 
+      # Bake the git tag into Version.current so the resulting binary
+      # knows what release it is — Updater.swift compares against this
+      # to decide whether to self-update at next launch.
+      - name: Bake version into Version.swift
+        run: |
+          sed -i '' 's/public static let current = "dev"/public static let current = "${{ github.ref_name }}"/' \
+            Sources/ClaudeCodeIRCCore/Util/Version.swift
+          grep 'public static let current' Sources/ClaudeCodeIRCCore/Util/Version.swift
+
       - name: Build release binary
         run: swift build -c release --disable-sandbox --product claudecodeirc
 
@@ -34,8 +43,11 @@ jobs:
       - name: Tar binary
         run: tar -czf claudecodeirc-darwin-arm64.tar.gz -C .build/release claudecodeirc
 
-      - name: Compute SHA256
-        run: shasum -a 256 claudecodeirc-darwin-arm64.tar.gz
+      # Sidecar SHA256 file uploaded alongside the tarball — Updater
+      # downloads both and refuses to apply the update if the digest
+      # doesn't match.
+      - name: Write SHA256 sidecar
+        run: shasum -a 256 claudecodeirc-darwin-arm64.tar.gz > claudecodeirc-darwin-arm64.tar.gz.sha256
 
       - name: Create GitHub Release
         env:
@@ -43,5 +55,6 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" \
             claudecodeirc-darwin-arm64.tar.gz \
+            claudecodeirc-darwin-arm64.tar.gz.sha256 \
             --title "${{ github.ref_name }}" \
             --generate-notes

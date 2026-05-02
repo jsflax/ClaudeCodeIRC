@@ -1,5 +1,6 @@
 import ClaudeCodeIRCCore
 import Foundation
+import class Lattice.TableResults
 import NCursesUI
 
 /// Time-merged stream of user/system chat messages, assistant chunks,
@@ -46,6 +47,13 @@ struct MessageListView: View {
     @Snapshot(sort: \ApprovalRequest.requestedAt) var approvals: [ApprovalRequest]
     @Snapshot(sort: \AskQuestion.requestedAt) var askQuestions: [AskQuestion]
     @Snapshot(sort: \ToolEvent.startedAt) var toolEvents: [ToolEvent]
+    /// Live Member query — `@Query`, not `@Snapshot`, because typing
+    /// indicator state is a property mutation (`Member.typingUntil`)
+    /// not an insert/delete. `@Snapshot` only refetches on row count
+    /// changes; `@Query` re-fires on property updates too. The
+    /// streaming-chunk SIGTRAP that motivated `@Snapshot` doesn't
+    /// apply — Member rows aren't inserted mid-iteration here.
+    @Query(sort: \Member.joinedAt) var members: TableResults<Member>
 
     var body: some View {
         VStack(spacing: 0) {
@@ -72,6 +80,8 @@ struct MessageListView: View {
                         turnId: turnId,
                         startedAt: startedAt,
                         tokensSoFar: tokensSoFar)
+                case .typing(let nick, let startedAt):
+                    TypingMessageRow(nick: nick, startedAt: startedAt)
                 }
             }
         }
@@ -126,6 +136,18 @@ struct MessageListView: View {
                 startedAt: turn.startedAt,
                 tokensSoFar: streamingTokensSoFar()))
         }
+        // Typing rows — one per non-self member with an unexpired
+        // `typingUntil`. Appended after `.thinking` so they sit at the
+        // bottom of the scrollback. Self-expiring via the `> now` check;
+        // no GC needed.
+        let now = Date.now
+        for m in members {
+            guard let until = m.typingUntil, until > now else { continue }
+            guard m.globalId != selfMember?.globalId else { continue }
+            merged.append(.typing(
+                nick: m.nick,
+                startedAt: until.addingTimeInterval(-3)))
+        }
         return merged
     }
 
@@ -167,6 +189,9 @@ enum RoomEvent: Identifiable {
     /// chat. Carries the turn's startedAt for the elapsed clock and
     /// a rough running token count off accumulated chunks.
     case thinking(turnId: UUID?, startedAt: Date, tokensSoFar: Int)
+    /// Synthetic, non-persisted "X is typing…" row. One per
+    /// non-self member with an unexpired `typingUntil`.
+    case typing(nick: String, startedAt: Date)
 
     var id: String {
         switch self {
@@ -176,6 +201,7 @@ enum RoomEvent: Identifiable {
         case .askQuestion(let q): return "q-\(q.globalId?.uuidString ?? "?")"
         case .toolEvent(let t):   return "t-\(t.globalId?.uuidString ?? "?")"
         case .thinking(let t, _, _): return "thinking-\(t?.uuidString ?? "current")"
+        case .typing(let nick, _):   return "typing-\(nick)"
         }
     }
 
@@ -187,6 +213,7 @@ enum RoomEvent: Identifiable {
         case .askQuestion(let q): return q.requestedAt
         case .toolEvent(let t):   return t.startedAt
         case .thinking(_, let s, _): return s
+        case .typing(_, let s):      return s
         }
     }
 }
@@ -220,6 +247,9 @@ struct MessageRow: View {
         case .thinking:
             // Routed to ThinkingMessageRow in the parent.
             Text("[thinking]").foregroundColor(.dim)
+        case .typing:
+            // Routed to TypingMessageRow in the parent.
+            Text("[typing]").foregroundColor(.dim)
         }
     }
 
@@ -409,6 +439,55 @@ struct ThinkingMessageRow: View {
     /// 4- / 5- / 6-pointed stars so the rotation reads as a pulsing
     /// point rather than a strict frame-by-frame progression.
     private static let glyphs: [String] = ["✶", "✱", "✳", "✴", "✷", "✦"]
+
+    private static func timeString(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f.string(from: d)
+    }
+}
+
+/// Ephemeral `HH:MM <alice> typing ● · ·` row. Mirrors
+/// `ThinkingMessageRow` so it sits at the bottom of scrollback while
+/// `Member.typingUntil > now` and disappears on expiry.
+///
+/// The dot animation reads `SpinnerTicker.shared.frame` so each tick
+/// (≈150 ms) re-evaluates the body — same observation-tracker hook
+/// `ThinkingMessageRow` uses. Phase advances every other tick so the
+/// animation reads at ~300 ms per dot.
+struct TypingMessageRow: View {
+    let nick: String
+    /// Stamp shown in HH:MM. Comes in as `typingUntil − 3 s` so a
+    /// fresh keystroke window keeps the row's clock current.
+    let startedAt: Date
+
+    var body: some View {
+        let frame = SpinnerTicker.shared.frame
+        // 4 frames: bold-left, bold-mid, bold-right, all-rest.
+        let phase = (frame / 2) % 4
+
+        let time = Self.timeString(startedAt)
+        let nickColor = NickColor.color(for: nick)
+
+        var line = Text("\(time) ").foregroundColor(.dim)
+        line = line + Text("<\(nick)> ").foregroundColor(nickColor).bold()
+        line = line + Text("typing ").foregroundColor(.dim)
+        line = line + dot(0, phase: phase)
+        line = line + Text(" ").foregroundColor(.dim)
+        line = line + dot(1, phase: phase)
+        line = line + Text(" ").foregroundColor(.dim)
+        line = line + dot(2, phase: phase)
+        return line
+    }
+
+    /// Filled dot when this index matches `phase`; dim middle-dot
+    /// otherwise. Phase 3 (no match) is the all-rest frame.
+    private func dot(_ index: Int, phase: Int) -> Text {
+        if phase == index {
+            return Text("●").bold()
+        }
+        return Text("·").foregroundColor(.dim)
+    }
 
     private static func timeString(_ d: Date) -> String {
         let f = DateFormatter()

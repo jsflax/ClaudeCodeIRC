@@ -28,6 +28,12 @@ public final class Member {
     public var isAway: Bool = false
     public var awayReason: String? = nil
 
+    /// Typing indicator. Set ~3s in the future on each (debounced)
+    /// keystroke and cleared on send. UI renders an ephemeral
+    /// "<nick> typing…" row for any non-self member where
+    /// `typingUntil > Date.now`. Self-expires without GC.
+    public var typingUntil: Date? = nil
+
     public var session: Session?
 
     @Relation(link: \ChatMessage.author)

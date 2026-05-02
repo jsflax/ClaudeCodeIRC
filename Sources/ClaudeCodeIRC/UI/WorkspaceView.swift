@@ -371,6 +371,29 @@ struct WorkspaceView: View {
                 model.pendingNotice = nil
             }
         }
+        // Typing indicator. Each keystroke remounts this task (id is
+        // `draft`); the 250ms sleep gives a natural debounce — rapid
+        // typing keeps cancelling and restarting before any write
+        // lands. After a pause we set selfMember.typingUntil 3s into
+        // the future; while still typing, we re-arm only when the
+        // current window is about to expire (caps writes at ~1/1.5s).
+        // Empty draft clears the field immediately so the row vanishes
+        // the instant the composer is empty.
+        .task(id: draft) {
+            guard let me = model.activeRoom?.selfMember else { return }
+            if draft.isEmpty {
+                if me.typingUntil != nil { me.typingUntil = nil }
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+            if Task.isCancelled { return }
+            let now = Date.now
+            if let until = me.typingUntil,
+               until > now.addingTimeInterval(1.5) {
+                return
+            }
+            me.typingUntil = now.addingTimeInterval(3)
+        }
         // Auto-seed sidebar selection when focus enters a sidebar.
         // Picks the first visible row so the user doesn't have to
         // press ↓ before Enter does anything.
@@ -744,6 +767,13 @@ struct WorkspaceView: View {
         }
         let raw = draft
         draft = ""
+        // Clear typing indicator on send. The .task(id: draft) above
+        // will also no-op the empty branch, but writing nil here is
+        // immediate (no 250ms debounce) so the row vanishes the
+        // moment the user hits Enter.
+        if let me = model.activeRoom?.selfMember, me.typingUntil != nil {
+            me.typingUntil = nil
+        }
         let intent = InputRouter.parse(raw)
 
         // Commands that work from the welcome state (no active room

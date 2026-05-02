@@ -27,6 +27,8 @@ CASES=(
     "c11:c11-auto-diff.sh:Edit/Write diff renders in auto mode (post-exec resultMeta)"
     "c12:c12-peer-crash-rejoin.sh:peer crash + /reopen over Cloudflare Tunnel"
     "c13:c13-utf8-input.sh:UTF-8 input in chat composer (accents + emoji)"
+    "c14:c14-typing-indicator.sh:per-member typing indicator"
+    "c15:c15-bell-non-active-room.sh:terminal bell on non-active room traffic"
 )
 
 # Optional case filter — if args are passed, only run those cases.

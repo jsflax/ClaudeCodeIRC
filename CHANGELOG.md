@@ -5,6 +5,51 @@ All notable changes to ClaudeCodeIRC are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.4] — 2026-05-02
+
+### Added
+
+- **Silent self-update on launch.** `Updater.runInBackground` checks
+  GitHub Releases for a newer published tag, downloads the tarball +
+  sidecar SHA256, verifies, and atomically swaps the on-disk binary.
+  The running process keeps executing on its already-loaded inode;
+  the new version takes effect on the next launch. Failure modes are
+  silent (logged to `ccirc.log`).
+- **Per-member typing indicator.** `Member.typingUntil: Date?` drives
+  an ephemeral `<nick> typing…` row in the message list for any
+  non-self member whose timestamp is still in the future. Composer
+  watches `draft` with a 250ms debounce and re-arms the field at
+  ~1/1.5s while the user is actively typing; empty draft + send
+  both clear it.
+- **Terminal bell on background-room traffic.** Non-active rooms
+  emit BEL (0x07) via `Term.bell()` when a foreign user/action
+  message lands. The active room stays silent; self / system /
+  assistant content is filtered upstream — only peer chat triggers.
+- **Multi-byte UTF-8 input** in the chat composer (NCursesUI
+  TextField fix). Accented characters (`á`, `é`, `ñ`, …), BMP emoji
+  (`♥`), supplementary-plane emoji (`👋`, `🎉`), and ZWJ
+  sequences (`👨‍👩‍👧`) all land verbatim instead of being
+  silently dropped. Pre-fix, every byte ≥ 0x7E was rejected.
+
+### Fixed
+
+- Peer `/reopen` over Cloudflare Tunnel now actually reconnects
+  (carried from the v0.0.3 changes — releasing as v0.0.4 since
+  v0.0.3 was not separately tagged for distribution).
+
+### Tests
+
+- New in-process E2E target `ClaudeCodeIRCE2ETests` ports the C1–C6
+  smoke cases to XCUITest-style Swift tests using the in-process
+  NCUITest probe — chat baseline, single-select Ask majority,
+  AskQuestion focus-leak, stuck-thinking-on-Ctrl-C-rejoin,
+  peer-ESC interrupt fanout, and host-leave dangling-author guard.
+  Runs under `swift test` alongside the unit suite; no tmux harness
+  needed.
+- `scripts/smoke/c14-typing-indicator.sh` and
+  `scripts/smoke/c15-bell-non-active-room.sh` cover the new typing
+  indicator and bell behaviours end-to-end.
+
 ## [0.0.3] — 2026-05-02
 
 ### Fixed

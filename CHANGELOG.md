@@ -5,6 +5,66 @@ All notable changes to ClaudeCodeIRC are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.5] — 2026-05-04
+
+### Fixed
+
+- **Host can rejoin own room after `/leave`.** alice hosts → bob joins →
+  alice `/leave`s → alice tries to come back → previously, neither side
+  saw the other's messages. Three architectural gaps fixed end-to-end:
+  - `RoomInstance.leave()` no longer cascade-deletes the host's `Member`
+    row. The cascade was wiping ChatMessage authorship and ownership
+    along with presence, so `activateRecent` had no Member with
+    `isHost=true` to match against and routed alice to `reopenAsPeer`,
+    which fails on LAN rooms. Host /leave now flips `isAway=true` and
+    clears `session.host`; `isHost` stays true as the durable owner
+    marker. Peer /leave still cascades.
+  - Peer host-departure signal moved from "Member globalId vanished"
+    to `session.host == nil`. New Session observer fires
+    `ejectIfHostLeft`; the legacy Member-delete path is kept as a
+    defensive fallback.
+  - `RoomsModel.leave(_:)` now re-runs `loadPersistedRooms` so the
+    just-left room appears in the Recent sidebar without requiring an
+    app restart. The scan is now idempotent.
+- **WSS sync ownership now handles URL changes.** When two `lattice_db`
+  instances on the same SQLite path race for the per-path `flock`,
+  `setup_sync_if_configured` now recognizes a same-process sibling on
+  a different `wssEndpoint` as a URL-change scenario and kicks the
+  sibling out via `teardown_sync(fire_handoff: false)`. Previously the
+  sibling-handoff in `teardown_sync` could resurrect a dormant ghost
+  (created by `Snapshot.Materializer`'s cross-actor `resolve`) on the
+  stale URL, after which the new opener's `setup_sync` silent-skipped
+  on flock contention — leaving the process with no live synchronizer
+  ("broadcast 0 peers" forever). Lands in LatticeCore@dc371c1.
+- **Bonjour TXT hostname** now prefers the `.local` answer from
+  `Host.current().names` when `ProcessInfo.hostName` returns the bare
+  BSD hostname. Bare hostnames are unresolvable to peers; observed
+  concretely as `ws://mac:PORT/...` on a fresh boot before mDNS
+  resolution stabilizes.
+
+### Added
+
+- **Optional Lattice C++ logging.** Set `LATTICE_LOG_LEVEL` env var
+  (`debug`/`info`/`warn`/`error`/`off`) at app launch — Lattice writes
+  to `~/Library/Logs/ClaudeCodeIRC/lattice-<pid>.log` (separate from
+  `ccirc.log` so the C++ output doesn't interleave). Off by default.
+
+### Tests
+
+- New `C7_HostRejoinAfterLeaveTests` covers the user-reported flow
+  end-to-end: alice host → bob join → message exchange → alice /leave
+  → both auto-eject → alice /reopen (no relaunch) → bob /join →
+  bidirectional post-rejoin messages.
+- New `RoomsModelLeaveTests` asserts recents repopulate on leave and
+  host's Member persists with `isHost=true && isAway=true &&
+  session.host=nil`.
+- C6 cascade-fragmentation test actor swapped from alice (host) to
+  bob (peer) since host /leave no longer cascades.
+- `RoomsModelDeleteRoomTests/leaveDeletesSelfMemberRow` updated to
+  `leaveKeepsHostMemberFlippedAway` for the new semantics.
+- New Lattice-layer `URLChangeSyncTests` verifies the sync-handover
+  fix at the library boundary.
+
 ## [0.0.4] — 2026-05-02
 
 ### Added

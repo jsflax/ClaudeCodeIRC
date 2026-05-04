@@ -41,3 +41,18 @@ public final class LocalGroup {
 
     public var addedAt: Date = Date()
 }
+
+extension LocalGroup {
+    /// User-facing label: bare `name` when unique among `peers`,
+    /// `name ·<hash6>` when another `LocalGroup` shares the name.
+    /// Single source of truth for the four sites that render group
+    /// labels (sidebar section header, status-bar suffix, recent-row
+    /// visibility marker, `/delgroup` ambiguous-error candidates) so
+    /// the disambiguation is consistent.
+    public func displayLabel(among peers: some Collection<LocalGroup>) -> String {
+        let collides = peers.contains {
+            $0.hashHex != self.hashHex && $0.name == self.name
+        }
+        return collides ? "\(name) ·\(hashHex.prefix(6))" : name
+    }
+}

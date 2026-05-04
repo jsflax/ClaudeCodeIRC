@@ -329,7 +329,10 @@ struct WorkspaceView: View {
         .overlay(isPresented: $addGroupVisible, dimsBackground: true) {
             AddGroupOverlay(
                 model: model,
-                isPresented: $addGroupVisible)
+                isPresented: $addGroupVisible,
+                onAdded: { added in
+                    handleGroupAdded(added)
+                })
         }
         .overlay(isPresented: $paletteSelectorVisible, dimsBackground: true) {
             PaletteSelectorOverlay(
@@ -473,12 +476,27 @@ struct WorkspaceView: View {
         // Tunnel state: only meaningful for non-private rooms. `pending`
         // = host picked public/group but cloudflared hasn't surfaced a
         // URL yet; `ready` = URL assigned and synced to peers via
-        // Session.publicURL.
+        // Session.publicURL. The scope reads `public` for public-bucket
+        // rooms and the local group label (e.g. `canary`, or
+        // `canary ·a3f1c2` on collision) for group rooms — falls back
+        // to a hash prefix when the local user doesn't hold the group
+        // secret (e.g. they joined via a directory listing they got
+        // out-of-band).
         if let session = room.session, session.visibility != .private {
+            let scope: String
+            switch session.visibility {
+            case .public:
+                scope = "public"
+            case .group:
+                scope = session.groupHashHex.flatMap(model.groupLabel(forHash:))
+                    ?? "group:\(session.groupHashHex?.prefix(6) ?? "?")"
+            case .private:
+                scope = ""  // unreachable — outer guard excludes
+            }
             if session.publicURL != nil {
-                line = line + Text(" [public:ready]").foregroundColor(.green)
+                line = line + Text(" [\(scope):ready]").foregroundColor(.green)
             } else {
-                line = line + Text(" [public:pending]").foregroundColor(.yellow)
+                line = line + Text(" [\(scope):pending]").foregroundColor(.yellow)
             }
         }
         if mode != .default {
@@ -799,6 +817,9 @@ struct WorkspaceView: View {
         case .newGroup(let name):
             handleNewGroup(name: name, room: model.activeRoom)
             return
+        case .delGroup(let query):
+            handleDelGroup(query: query, room: model.activeRoom)
+            return
         case .palette:
             paletteSelectorVisible = true
             return
@@ -828,7 +849,7 @@ struct WorkspaceView: View {
         if let me = room.selfMember, me.isAway {
             switch intent {
             case .afk: break // explicit toggle — handled below
-            case .empty, .unknown, .leave, .deleteRoom, .clear, .palette, .host, .join, .reopen, .addGroup, .newGroup: break
+            case .empty, .unknown, .leave, .deleteRoom, .clear, .palette, .host, .join, .reopen, .addGroup, .newGroup, .delGroup: break
             default:
                 me.isAway = false
                 me.awayReason = nil
@@ -837,7 +858,7 @@ struct WorkspaceView: View {
         }
 
         switch intent {
-        case .empty, .host, .join, .reopen, .addGroup, .newGroup, .palette, .setNick:
+        case .empty, .host, .join, .reopen, .addGroup, .newGroup, .delGroup, .palette, .setNick:
             // Handled above — listed here only for the exhaustive
             // switch; shouldn't reach this branch.
             return
@@ -921,6 +942,8 @@ struct WorkspaceView: View {
             addGroupVisible = true
         case .newGroup(let name):
             handleNewGroup(name: name, room: room)
+        case .delGroup(let query):
+            handleDelGroup(query: query, room: room)
         case .unknown(let reason):
             insertSystem(room: room, "error: \(reason)")
         }
@@ -1238,6 +1261,35 @@ struct WorkspaceView: View {
             insertSystem(room: room, banner)
         } else {
             pendingNewGroupInvite = result.invite
+        }
+    }
+
+    /// Post-add hook for `/addgroup` (the AddGroupOverlay submit).
+    /// Surfaces a name-collision notice when another local group
+    /// already shares the new row's name — without this, the second
+    /// canary just silently appears in the sidebar with a `·hash6`
+    /// suffix and looks like a duplicate, which is the exact
+    /// confusion that produced this fix.
+    private func handleGroupAdded(_ added: LocalGroup) {
+        let same = model.prefsLattice.objects(LocalGroup.self)
+            .filter { $0.name == added.name && $0.hashHex != added.hashHex }
+        guard !same.isEmpty else { return }
+        let suffix = added.hashHex.prefix(6)
+        feedback(
+            "added group '\(added.name)' (·\(suffix)) — note: another group with this name already exists locally; the sidebar shows them as '<name> ·<hash>'",
+            room: model.activeRoom)
+    }
+
+    /// Drop a `LocalGroup` row that the user no longer wants in their
+    /// sidebar. The match string is matched against `name` or
+    /// `hashHex` prefix; ambiguous matches surface a help message
+    /// listing the disambiguating hash prefixes.
+    private func handleDelGroup(query: String, room: RoomInstance?) {
+        do {
+            let g = try model.deleteGroup(matching: query)
+            feedback("group '\(g.name)' removed", room: room)
+        } catch {
+            feedback("error: \(error.localizedDescription)", room: room)
         }
     }
 
@@ -1917,6 +1969,13 @@ struct JoinFormOverlay: View {
 struct AddGroupOverlay: View {
     let model: RoomsModel
     @Binding var isPresented: Bool
+    /// Called after a successful add. Parent uses this to surface a
+    /// system message in the active room (e.g. a name-collision
+    /// notice — the second of two same-named groups would otherwise
+    /// silently appear in the sidebar with a `·hash6` suffix and
+    /// confuse the user, which is exactly the path that produced
+    /// this fix).
+    let onAdded: (LocalGroup) -> Void
 
     @State private var invite: String = ""
     @State private var error: String = ""
@@ -1946,8 +2005,9 @@ struct AddGroupOverlay: View {
 
     private func submit() {
         do {
-            _ = try model.addGroup(invitePaste: invite)
+            let added = try model.addGroup(invitePaste: invite)
             isPresented = false
+            onAdded(added)
         } catch {
             self.error = "\(error)"
         }

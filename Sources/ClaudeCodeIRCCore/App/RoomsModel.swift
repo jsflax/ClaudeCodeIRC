@@ -507,6 +507,37 @@ public final class RoomsModel {
         }
     }
 
+    public enum DeleteGroupError: Error, LocalizedError {
+        case notFound(String)
+        /// `candidates` are pre-rendered `displayLabel(among:)` strings —
+        /// guaranteed to disambiguate the matched rows so the error
+        /// message is directly actionable ("use the hash prefix").
+        case ambiguous(String, candidates: [String])
+        public var errorDescription: String? {
+            switch self {
+            case .notFound(let q):
+                return "no group matching '\(q)'"
+            case .ambiguous(let q, let cs):
+                return "'\(q)' matches multiple groups: "
+                    + cs.joined(separator: ", ")
+                    + ". Use the hash prefix to disambiguate."
+            }
+        }
+    }
+
+    /// Resolve a `Session.groupHashHex` to the user-facing label drawn
+    /// from the local `LocalGroup` rows. Returns `nil` when the hash
+    /// isn't in `prefsLattice` (e.g. peer joined a group room without
+    /// holding the secret) — the caller decides the fallback (commonly
+    /// a 6-char hex prefix of the hash itself).
+    public func groupLabel(forHash hash: String) -> String? {
+        let groups = Array(prefsLattice.objects(LocalGroup.self))
+        guard let match = groups.first(where: { $0.hashHex == hash }) else {
+            return nil
+        }
+        return match.displayLabel(among: groups)
+    }
+
     /// Generate a brand-new group: random 32-byte secret, computed
     /// `hashHex`, persisted `LocalGroup` row, and a returned invite
     /// code (`ccirc-group:v1:<name>:<base64url(secret)>`) the caller
@@ -538,6 +569,56 @@ public final class RoomsModel {
         let invite = GroupInviteCode.encode(name: name, secret: secret)
         Log.line("rooms", "createGroup: name=\(name) hash=\(hash.prefix(8))…")
         return (g, invite)
+    }
+
+    /// Remove a `LocalGroup` row from `prefs.lattice`. The query
+    /// matches against either `name` (case-insensitive equality) or
+    /// `hashHex` (case-insensitive prefix), and:
+    ///
+    /// - 0 matches → `DeleteGroupError.notFound`
+    /// - 2+ matches → `DeleteGroupError.ambiguous`, with each
+    ///   candidate's `displayLabel(among:)` so the user can re-issue
+    ///   `/delgroup` with the disambiguating hash prefix.
+    /// - 1 match → row deleted; returns the deleted row for the
+    ///   caller's confirmation message.
+    ///
+    /// Does NOT unpublish a hosted room from the directory — the
+    /// host's `Session.groupHashHex` and the directory bucket
+    /// continue independently. Peers who hold the secret keep seeing
+    /// the listing. The deletion is purely local: the corresponding
+    /// sidebar section disappears, and the host can no longer pick
+    /// this group from `/host`'s visibility cycler.
+    /// Snapshot of the deleted row's identifying fields, captured
+    /// **before** `prefsLattice.delete` zeroes the live object's
+    /// properties — callers want to confirm "group <name> deleted",
+    /// and reading `.name` off a post-delete `LocalGroup` returns
+    /// empty.
+    public struct DeletedGroup: Sendable {
+        public let name: String
+        public let hashHex: String
+    }
+
+    @discardableResult
+    public func deleteGroup(matching query: String) throws -> DeletedGroup {
+        let groups = Array(prefsLattice.objects(LocalGroup.self))
+        let q = query.lowercased()
+        let matches = groups.filter {
+            $0.name.lowercased() == q || $0.hashHex.lowercased().hasPrefix(q)
+        }
+        switch matches.count {
+        case 0:
+            throw DeleteGroupError.notFound(query)
+        case 1:
+            let g = matches[0]
+            let snapshot = DeletedGroup(name: g.name, hashHex: g.hashHex)
+            Log.line("rooms",
+                "deleteGroup: name=\(snapshot.name) hash=\(snapshot.hashHex.prefix(8))…")
+            prefsLattice.delete(g)
+            return snapshot
+        default:
+            throw DeleteGroupError.ambiguous(query,
+                candidates: matches.map { $0.displayLabel(among: groups) })
+        }
     }
 
     /// Parse a `ccirc-group:v1:` paste, compute the directory bucket

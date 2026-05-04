@@ -114,6 +114,7 @@ struct SessionsSidebar: View {
                 ForEach(Array(model.recentLattices.indices)) { idx in
                     let entry = model.recentLattices[idx]
                     RecentRoomRow(
+                        model: model,
                         code: entry.code,
                         highlighted: paneFocused && selectedRow == .recent(entry.code))
                         .environment(\.lattice, entry.lattice)
@@ -240,13 +241,16 @@ struct GroupsSidebarSection: View {
             ForEach(groupArray) { group in
                 let rooms = (model.directoryRoomsByGroup[group.hashHex] ?? [])
                     .filter { !joinedCodes.contains($0.roomId) }
+                let label = group.displayLabel(among: groupArray)
                 // Always render the section header for a group the user
                 // joined — empty state is informative ("Canary (0)" tells
                 // them the group is being polled and just has no public
-                // rooms right now).
+                // rooms right now). Same-named groups get a `·hash6`
+                // suffix from `displayLabel` so the user can tell them
+                // apart (e.g. before/after key rotation).
                 VStack(spacing: 0) {
                     SpacerView(1)
-                    Text(fillRule("\(group.name) (\(rooms.count))", width: width))
+                    Text(fillRule("\(label) (\(rooms.count))", width: width))
                         .foregroundColor(headerColor)
                     ForEach(rooms) { room in
                         DirectoryRow(
@@ -286,6 +290,7 @@ struct DirectoryRow: View {
 /// activated via `/reopen [name]` from the input line — sidebar
 /// itself has no per-row click handler.
 struct RecentRoomRow: View {
+    let model: RoomsModel
     let code: String
     let highlighted: Bool
 
@@ -299,7 +304,21 @@ struct RecentRoomRow: View {
             line = line + Text(" 🔒").foregroundColor(.dim)
         }
         if let v = session?.visibility, v != .private {
-            line = line + Text("  \(v.rawValue)").foregroundColor(.dim)
+            // For .group, resolve `groupHashHex` to the user-facing
+            // local label (e.g. `canary`) — not the bare enum
+            // rawValue ("group"), which is meaningless to the user
+            // when multiple groups exist.
+            let label: String
+            switch v {
+            case .public:
+                label = "public"
+            case .group:
+                label = session?.groupHashHex.flatMap(model.groupLabel(forHash:))
+                    ?? "group"
+            case .private:
+                label = ""  // unreachable
+            }
+            line = line + Text("  \(label)").foregroundColor(.dim)
         }
         return line.reverse(highlighted)
     }

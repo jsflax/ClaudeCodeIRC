@@ -106,6 +106,12 @@ public enum InputRouter {
         /// message in the lobby so the user can copy/share it.
         case newGroup(String)
 
+        /// Remove a local `LocalGroup` row matching either the group's
+        /// name or a hex prefix of its `hashHex`. Doesn't unpublish any
+        /// hosted room — peers still holding the secret continue to
+        /// see directory listings.
+        case delGroup(String)
+
         /// Recognised slash prefix but unknown command — caller
         /// renders an error banner instead of treating as chat.
         case unknown(String)
@@ -198,6 +204,14 @@ public enum InputRouter {
                 return .unknown("/newgroup name can't contain whitespace")
             }
             return .newGroup(rest)
+        case "delgroup":
+            guard !rest.isEmpty else {
+                return .unknown("/delgroup needs a name or hash prefix")
+            }
+            guard !rest.contains(where: { $0.isWhitespace }) else {
+                return .unknown("/delgroup takes one name or hash (no whitespace)")
+            }
+            return .delGroup(rest)
         case "":
             // Bare "/" — treat as chat so users can type "/usr/bin"
             // without it disappearing into the parser.
@@ -223,6 +237,7 @@ public enum InputRouter {
         Command(name: "reopen",  usage: "/reopen [name]",  description: "reopen a previously joined room from disk"),
         Command(name: "addgroup",usage: "/addgroup",       description: "add a group invite (opens form to paste)"),
         Command(name: "newgroup",usage: "/newgroup <name>", description: "create a new group, prints invite to share"),
+        Command(name: "delgroup",usage: "/delgroup <name|hash>", description: "remove a local group label (does not affect peers)"),
         Command(name: "nick",    usage: "/nick <name>",    description: "change your nickname"),
         Command(name: "members", usage: "/members",        description: "list members in this room"),
         Command(name: "side",    usage: "/side <msg>",     description: "banter excluded from Claude's context"),

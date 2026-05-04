@@ -5,6 +5,42 @@ All notable changes to ClaudeCodeIRC are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.6] — 2026-05-04
+
+### Added
+
+- **`/delgroup <name|hash>`** removes a `LocalGroup` row from your local
+  prefs. Matches by name (exact, case-insensitive) or hash prefix; on
+  ambiguous names, the error message lists the candidates with their
+  6-char hash suffix so you can re-issue with the disambiguating
+  prefix. Does NOT unpublish a hosted room from the directory bucket
+  — peers who hold the secret continue to see the listing; only the
+  local sidebar section disappears.
+
+### Fixed
+
+- **Group rooms now show their group name in the bottom status bar.**
+  Was reading `[public:ready]` for any non-private room. Now resolves
+  `Session.groupHashHex` against the local `LocalGroup` rows and
+  prints `[canary:ready]` (or `[canary:pending]` while the tunnel is
+  warming up). Falls back to a 6-char hash prefix when the local user
+  doesn't hold the group secret.
+- **Recent-rooms sidebar shows group name** instead of the bare
+  `group` enum rawValue for non-private recent rooms. Same lookup
+  path as the status-bar label.
+- **Same-named groups in the sidebar are now disambiguated** with a
+  `·<hash6>` suffix on the section header, matching the contract the
+  `LocalGroup` doc comment has carried since the model was introduced
+  ("two groups with the same `name` but different secrets coexist;
+  the UI disambiguates them with `addedAt` or a hash prefix"). The
+  full-name display is preserved when names are unique.
+- **`/addgroup` now warns on a name collision.** When pasting an
+  invite whose name matches an existing local group with a different
+  hash, you see "another group with this name exists locally; the
+  sidebar shows them as `<name> ·<hash>`". Prevents the silent
+  "I added it but it looks like a duplicate" confusion that surfaced
+  this fix series.
+
 ## [0.0.5] — 2026-05-04
 
 ### Fixed

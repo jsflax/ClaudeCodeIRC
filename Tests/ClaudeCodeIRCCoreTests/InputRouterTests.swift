@@ -211,4 +211,26 @@ import ClaudeCodeIRCCore
     @Test func joinCaseInsensitive() {
         #expect(InputRouter.parse("/JOIN beta") == .join("beta"))
     }
+
+    // MARK: - /delgroup
+
+    @Test func delGroupParsesNameArg() {
+        #expect(InputRouter.parse("/delgroup canary") == .delGroup("canary"))
+    }
+
+    @Test func delGroupParsesHashPrefixArg() {
+        #expect(InputRouter.parse("/delgroup a3f1c2") == .delGroup("a3f1c2"))
+    }
+
+    @Test func delGroupRejectsEmpty() {
+        if case .unknown = InputRouter.parse("/delgroup") {} else {
+            Issue.record("expected .unknown for /delgroup with no arg")
+        }
+    }
+
+    @Test func delGroupRejectsWhitespace() {
+        if case .unknown = InputRouter.parse("/delgroup foo bar") {} else {
+            Issue.record("expected .unknown for /delgroup with whitespace arg")
+        }
+    }
 }

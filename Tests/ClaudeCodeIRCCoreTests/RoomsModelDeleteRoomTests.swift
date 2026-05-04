@@ -7,9 +7,12 @@ import ClaudeCodeIRCCore
 /// `RoomsModel.deleteRoom(_:)`:
 ///
 /// - `leave(_:)` tears down the live `RoomInstance` (publisher / sync
-///   server / driver) and deletes the local `Member` row, but leaves
-///   the on-disk `<rooms>/<code>.lattice` file in place. Next launch
-///   the room reappears under "Recent" via `loadPersistedRooms()`.
+///   server / driver). For a peer, the local `Member` row is deleted
+///   so the host's lattice sees the peer depart. For a host, the row
+///   is kept (with `isAway = true`, `session.host = nil`, `isHost`
+///   stays true) so the durable "this is my room" marker survives
+///   for `/reopen`. The on-disk `<rooms>/<code>.lattice` file persists
+///   in either case, and the room reappears under "Recent".
 ///
 /// - `deleteRoom(_:)` does everything `leave(_:)` does, then closes
 ///   any cached recent-lattice handle for the same code and removes
@@ -74,7 +77,7 @@ import ClaudeCodeIRCCore
         }
     }
 
-    @Test func leaveDeletesSelfMemberRow() async throws {
+    @Test func leaveKeepsHostMemberFlippedAway() async throws {
         try await withTempDataDir {
             let (model, room) = try await hostPrivate()
             let code = room.roomCode
@@ -85,15 +88,24 @@ import ClaudeCodeIRCCore
 
             await model.leave(room.id)
 
-            // Reopen the lattice from disk and confirm the row is gone.
-            // (We can't read from `room.lattice` after leave — that
-            // handle is closed inside RoomInstance.leave.)
+            // Reopen the lattice from disk and confirm host's Member
+            // persists with the vacated-host state. (We can't read from
+            // `room.lattice` after leave — that handle is closed inside
+            // RoomInstance.leave.)
             let reopened = try Lattice(
                 for: RoomStore.schema,
                 configuration: .init(fileURL: RoomPaths.storeURL(forCode: code)))
             defer { reopened.close() }
-            #expect(reopened.objects(Member.self).isEmpty,
-                "leave must delete the local Member row so peers see us depart")
+            let members = Array(reopened.objects(Member.self))
+            #expect(members.count == 1,
+                "host /leave must NOT delete its own Member — that would cascade-delete authorship and ownership")
+            if let me = members.first {
+                #expect(me.isHost, "isHost stays true as the durable owner marker")
+                #expect(me.isAway, "isAway flips true as the presence-gone signal")
+            }
+            let session = reopened.objects(Session.self).first { $0.code == code }
+            #expect(session?.host == nil,
+                "session.host must clear so peers' ejectIfHostLeft fires")
         }
     }
 

@@ -179,6 +179,13 @@ public final class RoomInstance: Identifiable {
     /// we ourselves should auto-leave instead of leaving a stale UI
     /// pointing at a dead Member. Cancelled in `leave()`.
     private var selfMemberObserver: AnyCancellable?
+    /// Peer-only. Watches Session updates — host /leave clears
+    /// `session.host` (without deleting the host's Member row, which
+    /// would cascade-delete every `_ChatMessage_Member_author` link
+    /// and erase the durable "this is alice's room" marker). When the
+    /// link goes nil we fire `ejectIfHostLeft` to auto-leave the peer.
+    /// Cancelled in `leave()`.
+    private var sessionObserver: AnyCancellable?
     /// Re-entrancy guard so two near-simultaneous Member.delete
     /// observer fires don't both kick off `onKickedFromHost`.
     private var kickInProgress: Bool = false
@@ -186,14 +193,9 @@ public final class RoomInstance: Identifiable {
     /// because a host-left can race a self-delete observation in either
     /// order, and each needs its own once-only fire.
     private var hostLeaveInProgress: Bool = false
-    /// Peer-only. Cached during `linkToSession` so we can detect when
-    /// the host's Member row is deleted from the synced state without
-    /// having to re-traverse `session.host` (the link accessor SIGSEGVs
-    /// on a dangling target — exactly the state we're trying to detect).
-    private var hostMemberGlobalId: UUID?
     /// Peer-only. Snapshot of `session.name` taken in `linkToSession`
     /// so the host-left notice can show the friendly name even after
-    /// `ejectIfHostDeleted` nils `session` to keep dying-link renders
+    /// `ejectIfHostLeft` nils `session` to keep dying-link renders
     /// out of the view tree.
     public private(set) var cachedSessionName: String?
     /// Wired by `RoomsModel` after the peer factory returns. Called
@@ -410,11 +412,7 @@ public final class RoomInstance: Identifiable {
         Log.line("room-peer", "linkToSession name=\(session.name) code=\(session.code)")
         self.session = session
         selfMember?.session = session
-        // Cache the host's globalId while the link is alive — once the
-        // host runs `/leave` and that row's delete syncs in, we can't
-        // safely traverse `session.host` again. See `ejectIfHostDeleted`.
         if !isHost {
-            self.hostMemberGlobalId = session.host?.globalId
             self.cachedSessionName = session.name
         }
     }
@@ -491,7 +489,18 @@ public final class RoomInstance: Identifiable {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.ejectIfSelfDeleted()
-                self.ejectIfHostDeleted()
+                // Defensive: legacy hosts that still cascade-delete on
+                // /leave produce a Member-delete frame as well as the
+                // session.host clear. `ejectIfHostLeft` is idempotent
+                // via `hostLeaveInProgress` so firing from both paths
+                // is safe.
+                self.ejectIfHostLeft()
+            }
+        }
+        sessionObserver = lattice.observe(Session.self) {
+            @Sendable [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.ejectIfHostLeft()
             }
         }
     }
@@ -511,23 +520,39 @@ public final class RoomInstance: Identifiable {
         Task { await handler?(roomId) }
     }
 
-    /// Peer-only. Mirrors `ejectIfSelfDeleted` but for the host's
-    /// row: when the host runs `/leave`, their `delete(me)` syncs
-    /// over WS, the row vanishes from the peer's lattice, and any
-    /// link traversing `session.host` (or `ChatMessage.author` when
-    /// the author was the host) walks into a freed C++
-    /// `dynamic_object` and SIGSEGVs. Detecting it here lets the
-    /// peer tear down before SwiftUI re-renders any dead-link view.
-    private func ejectIfHostDeleted() {
+    /// Peer-only. Fires when the host runs `/leave` — they clear
+    /// `session.host` (without deleting their Member row, since that
+    /// would cascade-delete every `_ChatMessage_Member_author` link
+    /// and orphan their authored messages on every peer). Idempotent
+    /// via `hostLeaveInProgress` so firing from both the Session
+    /// observer and the legacy Member-delete path is safe.
+    private func ejectIfHostLeft() {
         guard !hostLeaveInProgress, !isHost else { return }
-        guard let id = hostMemberGlobalId else { return }
-        guard lattice.object(Member.self, globalId: id) == nil else { return }
+        // Require `session` to be linked first — otherwise a Session
+        // observer fire that arrives while `linkToSession` is still
+        // pending (catch-up sync window) would treat "I haven't linked
+        // yet" as "the host left" and self-eject a fresh peer.
+        guard let s = self.session, s.host == nil else { return }
         hostLeaveInProgress = true
         let roomId = self.id
         let handler = onHostLeft
-        // Drop the @Observable references first — SwiftUI views that
-        // were observing them will re-evaluate with `nil` and short-
-        // circuit before the async leave runs.
+        // Delete our own Member row so the local lattice ends in a
+        // "no member" state — when the peer rejoins later via `/join`,
+        // the peer factory mints a fresh Member instead of reusing a
+        // stale one whose backing C++ identity may have been torn down
+        // by the lattice close in `leave()`. Mirrors the old
+        // cascade-driven path: alice's /leave used to delete her
+        // Member, the cascade synced bob's view of her down, AND bob's
+        // lattice's own Member was dropped in `instance.leave()` —
+        // because `selfMember` was still non-nil when leave ran. Now
+        // alice's leave doesn't cascade, so we have to clear bob's
+        // Member explicitly here.
+        if let me = selfMember {
+            lattice.delete(me)
+        }
+        // Drop the @Observable references — SwiftUI views observing
+        // them will re-evaluate with `nil` and short-circuit before
+        // the async leave runs.
         selfMember = nil
         session = nil
         Task { await handler?(roomId) }
@@ -540,6 +565,8 @@ public final class RoomInstance: Identifiable {
         presenceSweeper = nil
         selfMemberObserver?.cancel()
         selfMemberObserver = nil
+        sessionObserver?.cancel()
+        sessionObserver = nil
         onKickedFromHost = nil
         onHostLeft = nil
         // Persist the leave by removing our Member row before tearing
@@ -551,7 +578,21 @@ public final class RoomInstance: Identifiable {
         // hits zero or the bounded deadline elapses (we don't block
         // leaving forever on a stuck network).
         if let me = selfMember {
-            lattice.delete(me)
+            if isHost {
+                // Host /leave: don't cascade-delete. Flipping `isAway`
+                // signals presence-gone; clearing `session.host` is the
+                // wire signal peers' `ejectIfHostLeft` watches. Keeping
+                // `isHost = true` and the Member row itself preserves
+                // the durable "this is my room" marker that
+                // `activateRecent` and `reopenAsHost`'s Member-fallback
+                // both consume on rejoin — and avoids the cascade that
+                // would otherwise nil out every `_ChatMessage_Member_author`
+                // link row, orphaning alice's prior messages.
+                me.isAway = true
+                session?.host = nil
+            } else {
+                lattice.delete(me)
+            }
             selfMember = nil
         }
         if !isHost {
@@ -578,6 +619,26 @@ public final class RoomInstance: Identifiable {
         if let driver { await driver.stop() }
         if let server { try? await server.stop() }
         publisher?.stop()
+        // Synchronous close — required for both hosts and peers.
+        //
+        // Host: `RoomsModel.leave(_:)` immediately reopens the same
+        // SQLite file as a recent-mode handle; two live handles racing
+        // on the WAL is the original C4/C6-class hazard.
+        //
+        // Peer: LatticeCore's `setup_sync_if_configured` guards on a
+        // cross-process `flock` over `<path>.sync.lock`. If this peer
+        // immediately re-`/join`s the same room (e.g. host /leave →
+        // host /reopen → peer /join again), the new Lattice's flock
+        // acquire is non-blocking and silently no-ops when the OLD
+        // peer Lattice still holds the lock — the new instance
+        // initialises with no synchronizer at all. ARC release isn't
+        // deterministic enough to clear the flock in time, so we
+        // close synchronously here.
+        Log.line("room-instance",
+                 "leave: about to lattice.close() isHost=\(self.isHost) " +
+                 "file=\(self.lattice.configuration.fileURL.lastPathComponent)")
+        lattice.close()
+        Log.line("room-instance", "leave: lattice.close() returned")
     }
 
     /// Best-effort wait for the local lattice to push pending writes

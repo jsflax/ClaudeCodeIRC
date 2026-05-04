@@ -35,7 +35,26 @@ public final class BonjourPublisher: NSObject, NetServiceDelegate, @unchecked Se
         // transient NWConnection just to resolve the endpoint. The `auth`
         // flag ("1"/"0") tells the lobby whether to prompt for a join
         // code or connect straight through.
-        let hostname = ProcessInfo.processInfo.hostName   // "foo.local"
+        // mDNS-resolvable hostname for the TXT record. Peers build
+        // `ws://<hostname>:<port>/room/<code>` from this and connect
+        // straight through.
+        //
+        // `ProcessInfo.hostName` can return either the canonical mDNS
+        // name (e.g. "canary-dry7t045gk.local") or the bare BSD hostname
+        // (e.g. "mac") depending on whether the system has finished
+        // resolving its `.local` name. The bare form is unresolvable to
+        // peers, so prefer the stable `.local` answer from
+        // `Host.current().names` when available, and fall back to
+        // appending `.local` to whatever ProcessInfo gives us.
+        let hostname: String = {
+            let names = Host.current().names
+            if let local = names.first(where: { $0.hasSuffix(".local") }) {
+                return local
+            }
+            var bare = ProcessInfo.processInfo.hostName
+            if !bare.hasSuffix(".local") { bare += ".local" }
+            return bare
+        }()
         let txt: [String: Data] = [
             "code": Data(roomCode.utf8),
             "host": Data(hostNick.utf8),

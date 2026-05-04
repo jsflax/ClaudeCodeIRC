@@ -10,10 +10,17 @@ extension NCUIApplication {
         let dataDir = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("ccirc-e2e-\(label)-\(UUID().uuidString.prefix(6))")
         try? FileManager.default.removeItem(atPath: dataDir)
+        var env: [String: String] = ["CCIRC_DATA_DIR": dataDir]
+        // Forward the test runner's LATTICE_LOG_LEVEL into the spawned
+        // binary so investigators can flip Lattice's C++ logging on
+        // without rebuilding.
+        if let level = ProcessInfo.processInfo.environment["LATTICE_LOG_LEVEL"] {
+            env["LATTICE_LOG_LEVEL"] = level
+        }
         return NCUIApplication(
             label: label,
             productName: "claudecodeirc",
-            launchEnvironment: ["CCIRC_DATA_DIR": dataDir]
+            launchEnvironment: env
         )
     }
 

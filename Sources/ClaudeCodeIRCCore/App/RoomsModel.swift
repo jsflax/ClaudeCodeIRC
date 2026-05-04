@@ -155,7 +155,8 @@ public final class RoomsModel {
             .map { $0.deletingPathExtension().lastPathComponent }
             .sorted()
         let joined = Set(joinedRooms.map(\.roomCode))
-        for code in codes where !joined.contains(code) {
+        let alreadyRecent = Set(recentLattices.map(\.code))
+        for code in codes where !joined.contains(code) && !alreadyRecent.contains(code) {
             do {
                 let lattice = try Lattice(
                     for: RoomStore.schema,
@@ -713,7 +714,18 @@ public final class RoomsModel {
                 activeRoomId = joinedRooms.first?.id
             }
         }
+        let wasHost = instance.isHost
         await instance.leave()
+        // Surface the just-left room in the Recent sidebar without
+        // requiring a relaunch. Host-only: peers re-join via Bonjour
+        // discovery, and `activateRecent` would route them back through
+        // `reopenAsPeer` which requires a cached `publicURL` (LAN peers
+        // don't have one). Adding peer auto-eject rooms to recents also
+        // races the rejoin path's lattice open against the recent
+        // handle's close.
+        if wasHost {
+            await loadPersistedRooms()
+        }
     }
 
     /// Leave AND delete the joined room. Same teardown as `leave(_:)`
@@ -779,7 +791,7 @@ public final class RoomsModel {
     private func makeHostLeftHandler() -> (UUID) async -> Void {
         return { [weak self] roomId in
             guard let self else { return }
-            // `session` was nilled by `ejectIfHostDeleted` to keep
+            // `session` was nilled by `ejectIfHostLeft` to keep
             // SwiftUI from rendering dead links, so use the snapshot
             // captured in `linkToSession`. Fall back to the room
             // code if the snapshot was never taken.

@@ -85,6 +85,26 @@ struct ClaudeCodeIRCApp: App {
 
     init() {
         Log.line("app", "startup — log file: \(Log.filePath)")
+        // Optional Lattice C++ logging — set `LATTICE_LOG_LEVEL=debug`
+        // (or info/warn/error/off) to enable. Lattice writes to its own
+        // file beside ccirc.log so the C++ output doesn't interleave with
+        // our app log lines.
+        if let level = ProcessInfo.processInfo.environment["LATTICE_LOG_LEVEL"]?.lowercased() {
+            let parsed: Lattice.LogLevel = switch level {
+            case "debug": .debug
+            case "info":  .info
+            case "warn":  .warn
+            case "error": .error
+            default: .off
+            }
+            Lattice.setLogLevel(parsed)
+            // Per-process log file so alice/bob don't trample each
+            // other when running concurrently in tests.
+            let dir = (Log.filePath as NSString).deletingLastPathComponent
+            let path = "\(dir)/lattice-\(getpid()).log"
+            Lattice.setLogFile(URL(fileURLWithPath: path))
+            Log.line("app", "Lattice logging level=\(level) → \(path)")
+        }
         // `@Query` Wrapper's init seeds its TableResults value from
         // `LatticeKey.defaultValue.objects(T.self)` BEFORE the active
         // room lattice is installed via the environment. If that

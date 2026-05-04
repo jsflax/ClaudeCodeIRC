@@ -408,14 +408,9 @@ public enum ApprovalMcpShim {
         }
     }
 
-    /// Single-property write wrapped in a transaction for shape
-    /// consistency with the rest of the shim's writes. Idempotent:
-    /// reading the row, mutating, committing.
     private static func setSessionMode(_ mode: PermissionMode, on lattice: Lattice) {
         guard let session = lattice.objects(Session.self).first else { return }
-        lattice.beginTransaction()
         session.permissionMode = mode
-        lattice.commitTransaction()
         Log.line("plan-shim", "session.permissionMode → \(mode.label)")
     }
 

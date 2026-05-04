@@ -307,7 +307,7 @@ struct WorkspaceView: View {
             // Shift-Tab cycles permission mode on the host — peers see
             // whatever the host sets via Session sync.
             guard let room = model.activeRoom, room.isHost,
-                  let s = room.session else { return }
+                  let s = room.lattice.objects(Session.self).first else { return }
             s.permissionMode = s.permissionMode.next()
             Log.line("workspace", "permission mode → \(s.permissionMode.label)")
         }

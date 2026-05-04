@@ -5,6 +5,41 @@ All notable changes to ClaudeCodeIRC are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.7] — 2026-05-04
+
+### Added
+
+- **C9 e2e — `Shift-Tab` cycler walk** (`PermissionModeCycleTests`).
+  Hosts a room and walks `default → accept-edits → plan → auto →
+  default`, asserting the status-bar mode marker after each press.
+- **C10 e2e — Shift-Tab cycler after `ExitPlanMode` vote**
+  (`PermissionModeAfterExitPlanTests`). Drives the real claude
+  binary: cycle into plan mode, `@claude` requests an action,
+  `ExitPlanMode` plan card materialises, vote "Yes — auto mode",
+  then verify Shift-Tab still cycles past `auto` back to `default`.
+
+### Changed
+
+- **Shift-Tab cycler re-resolves `Session` from the lattice** on each
+  press (`room.lattice.objects(Session.self).first`) instead of
+  reading through the cached `room.session` Swift wrapper. Defensive
+  — no confirmed Lattice staleness bug, but the new C10 test only
+  passes with this change. Worth a follow-up to determine whether
+  Lattice's cross-instance observation is leaking a stale wrapper.
+- **`ApprovalMcpShim.setSessionMode`** drops its
+  `beginTransaction()/commitTransaction()` wrapper around a single
+  property write. No semantic difference for one write; the bracket
+  was unnecessary scaffolding.
+
+### Known issues
+
+- **Claude CLI `--resume` intermittently ignores `--permission-mode`.**
+  Reproducible with raw `claude -p` calls — after a few `--resume`
+  spawns, the model reports "Default mode" even when
+  `--permission-mode plan` (or any non-default) is on the command
+  line. Recovers on its own after a few more turns. Filed upstream;
+  no workaround in ccirc beyond starting a fresh session.
+
 ## [0.0.6] — 2026-05-04
 
 ### Added
